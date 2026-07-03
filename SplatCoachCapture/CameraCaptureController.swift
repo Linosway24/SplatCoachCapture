@@ -43,7 +43,11 @@ final class CameraCaptureController: NSObject, ObservableObject {
     @Published private(set) var currentOrientationText = "Portrait"
     @Published private(set) var lastViewChangeScore = 0.0
     @Published private(set) var lastRotationChangeRadians = 0.0
+    @Published private(set) var lastSavedJPGOrientation = "None"
     @Published private(set) var captureFPS = 0.0
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportProgressText: String?
+    @Published private(set) var exportErrorMessage: String?
 
     let session = AVCaptureSession()
 
@@ -105,6 +109,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastBlurScore = nil
         lastViewChangeScore = 0
         lastRotationChangeRadians = 0
+        lastSavedJPGOrientation = "None"
         captureFPS = 0
         frameIndex = 0
         lastSavedAt = .distantPast
@@ -133,12 +138,32 @@ final class CameraCaptureController: NSObject, ObservableObject {
         motionManager.stopDeviceMotionUpdates()
     }
 
-    func makeExportArchive() -> URL? {
-        guard !savedImageURLs.isEmpty else { return nil }
+    func clearExportError() {
+        exportErrorMessage = nil
+    }
+
+    func clearExportProgress() {
+        guard !isExporting else { return }
+        exportProgressText = nil
+    }
+
+    func makeExportArchive() async -> URL? {
+        guard !isExporting else { return nil }
+        guard !savedImageURLs.isEmpty else {
+            exportErrorMessage = "No saved frames are available to export."
+            return nil
+        }
+
+        isExporting = true
+        exportErrorMessage = nil
+        exportProgressText = "Preparing export"
 
         let scanName = outputDirectory?.lastPathComponent ?? "splatcoach-scan"
         let archiveURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(scanName).zip")
+        let imageEntries = savedImageURLs.map { url in
+            ZipFileEntry(sourceURL: url, path: "images/\(url.lastPathComponent)")
+        }
 
         do {
             if FileManager.default.fileExists(atPath: archiveURL.path) {
@@ -146,16 +171,27 @@ final class CameraCaptureController: NSObject, ObservableObject {
             }
 
             let reportData = try makeCaptureReportData()
-            try ZipArchiveWriter.write(
-                files: savedImageURLs,
-                dataEntries: [
-                    ZipDataEntry(path: "\(scanName)/capture_report.json", data: reportData)
-                ],
-                to: archiveURL,
-                rootFolderName: scanName
-            )
+            try await Task.detached(priority: .userInitiated) { [weak self] in
+                try ZipArchiveWriter.write(
+                    fileEntries: imageEntries,
+                    dataEntries: [
+                        ZipDataEntry(path: "capture_report.json", data: reportData)
+                    ],
+                    to: archiveURL
+                ) { completed, total in
+                    Task { @MainActor in
+                        self?.exportProgressText = "Zipping \(completed) / \(total)"
+                    }
+                }
+            }.value
+
+            exportProgressText = "Opening share sheet"
+            isExporting = false
             return archiveURL
         } catch {
+            isExporting = false
+            exportProgressText = nil
+            exportErrorMessage = "Export failed: \(error.localizedDescription)"
             statusText = "Export failed"
             lastRejectReason = "Export failed"
             return nil
@@ -434,7 +470,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 blurScore: blurScore,
                 motionMagnitude: motion.magnitude,
                 rotationDelta: motion.rotationDelta.isFinite ? motion.rotationDelta : nil,
-                viewChangeScore: viewChangeScore
+                viewChangeScore: viewChangeScore?.finiteOrNil
             )
         )
     }
@@ -463,14 +499,14 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastSavedAttitude = attitude
         frameIndex += 1
 
-        let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation.imageOrientation)
+        let image = Self.imageForJPEG(from: pixelBuffer, orientation: orientation)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
 
-        guard let data = imageContext.jpegRepresentation(
-            of: image,
-            colorSpace: colorSpace,
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: CaptureTuning.jpegQuality]
-        ) else {
+        guard
+            let cgImage = imageContext.createCGImage(image, from: image.extent),
+            let data = UIImage(cgImage: cgImage, scale: 1, orientation: .up)
+                .jpegData(compressionQuality: CaptureTuning.jpegQuality)
+        else {
             rejectFrame(
                 number: frameNumber,
                 timestamp: capturedAt,
@@ -491,6 +527,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             try data.write(to: url, options: [.atomic])
             savedFrameCount += 1
             savedImageURLs.append(url)
+            lastSavedJPGOrientation = "\(orientation.displayName) \(Int(image.extent.width))x\(Int(image.extent.height))"
             statusText = "Good frame"
             lastSaveReason = reason
             updateElapsedTime(capturedAt)
@@ -505,7 +542,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                     blurScore: blurScore,
                     motionMagnitude: motion.magnitude,
                     rotationDelta: motion.rotationDelta.isFinite ? motion.rotationDelta : nil,
-                    viewChangeScore: viewChangeScore
+                    viewChangeScore: viewChangeScore.finiteOrNil
                 )
             )
         } catch {
@@ -576,11 +613,12 @@ final class CameraCaptureController: NSObject, ObservableObject {
             averageBlurScore: frameEvents.compactMap(\.blurScore).average,
             averageMotionScore: frameEvents.map(\.motionMagnitude).average,
             averageTimeBetweenSaves: savedIntervals.average,
-            perFrame: frameEvents
+            perFrame: frameEvents.map(\.jsonSafe)
         )
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(report)
     }
 
@@ -678,6 +716,23 @@ final class CameraCaptureController: NSObject, ObservableObject {
         }
         return totalDifference / Double(current.count)
     }
+
+    private static func imageForJPEG(
+        from pixelBuffer: CVPixelBuffer,
+        orientation: AVCaptureVideoOrientation
+    ) -> CIImage {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let extent = image.extent
+        let isBufferLandscape = extent.width >= extent.height
+
+        if orientation.isLandscape {
+            guard !isBufferLandscape else { return image }
+            return image.oriented(orientation.landscapeImageOrientation)
+        }
+
+        guard isBufferLandscape else { return image }
+        return image.oriented(orientation.portraitImageOrientation)
+    }
 }
 
 private struct MotionSample {
@@ -768,18 +823,29 @@ extension AVCaptureVideoOrientation {
         }
     }
 
-    var imageOrientation: CGImagePropertyOrientation {
+    var portraitImageOrientation: CGImagePropertyOrientation {
         switch self {
         case .portrait:
             .right
         case .portraitUpsideDown:
             .left
+        case .landscapeLeft, .landscapeRight:
+            .right
+        @unknown default:
+            .right
+        }
+    }
+
+    var landscapeImageOrientation: CGImagePropertyOrientation {
+        switch self {
         case .landscapeLeft:
             .down
         case .landscapeRight:
             .up
+        case .portrait, .portraitUpsideDown:
+            .up
         @unknown default:
-            .right
+            .up
         }
     }
 
@@ -821,8 +887,32 @@ private extension UIDevice {
 
 private extension Array where Element == Double {
     var average: Double? {
-        guard !isEmpty else { return nil }
-        return reduce(0, +) / Double(count)
+        let finiteValues = filter(\.isFinite)
+        guard !finiteValues.isEmpty else { return nil }
+        return finiteValues.reduce(0, +) / Double(finiteValues.count)
+    }
+}
+
+private extension Double {
+    var finiteOrNil: Double? {
+        isFinite ? self : nil
+    }
+}
+
+private extension CaptureFrameEvent {
+    var jsonSafe: CaptureFrameEvent {
+        CaptureFrameEvent(
+            frameNumber: frameNumber,
+            timestamp: timestamp,
+            saved: saved,
+            saveReason: saveReason,
+            rejectReason: rejectReason,
+            orientation: orientation,
+            blurScore: blurScore?.finiteOrNil,
+            motionMagnitude: motionMagnitude.isFinite ? motionMagnitude : 0,
+            rotationDelta: rotationDelta?.finiteOrNil,
+            viewChangeScore: viewChangeScore?.finiteOrNil
+        )
     }
 }
 

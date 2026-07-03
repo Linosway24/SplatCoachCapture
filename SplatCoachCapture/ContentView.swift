@@ -48,6 +48,12 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+
+                if let exportProgressText = camera.exportProgressText {
+                    exportProgressOverlay(exportProgressText)
+                        .padding(.top, proxy.safeAreaInsets.top + 76)
+                        .transition(.opacity)
+                }
             }
         }
         .background(Color.black)
@@ -58,10 +64,25 @@ struct ContentView: View {
         .onChange(of: camera.statusText) { _, newStatus in
             showFeedback(for: newStatus)
         }
-        .sheet(isPresented: $isShowingShareSheet) {
+        .sheet(isPresented: $isShowingShareSheet, onDismiss: {
+            camera.clearExportProgress()
+        }) {
             if let exportArchiveURL {
                 ShareSheet(activityItems: [exportArchiveURL])
             }
+        }
+        .alert(
+            "Export Failed",
+            isPresented: Binding(
+                get: { camera.exportErrorMessage != nil },
+                set: { if !$0 { camera.clearExportError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                camera.clearExportError()
+            }
+        } message: {
+            Text(camera.exportErrorMessage ?? "The export could not be completed.")
         }
     }
 
@@ -190,14 +211,33 @@ struct ContentView: View {
 
     private var exportButton: some View {
         Button {
-            exportArchiveURL = camera.makeExportArchive()
-            isShowingShareSheet = exportArchiveURL != nil
+            Task {
+                exportArchiveURL = await camera.makeExportArchive()
+                isShowingShareSheet = exportArchiveURL != nil
+            }
         } label: {
-            Label("Export ZIP", systemImage: "archivebox")
+            Label(camera.isExporting ? "Exporting" : "Export ZIP", systemImage: "archivebox")
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(OverlayButtonStyle(isProminent: false))
-        .disabled(camera.savedImageURLs.isEmpty)
+        .disabled(camera.savedImageURLs.isEmpty || camera.isExporting)
+    }
+
+    private func exportProgressOverlay(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+
+            Text(text)
+                .font(.headline.weight(.bold))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.black.opacity(0.72), in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        }
     }
 
     private var debugOverlay: some View {
@@ -224,6 +264,7 @@ struct ContentView: View {
             debugRow("Blur Score", camera.lastBlurScore.map { String(format: "%.1f", $0) } ?? "Unavailable")
             debugRow("Motion Status", camera.motionStatus)
             debugRow("Current Orientation", camera.currentOrientationText)
+            debugRow("Last JPG Orientation", camera.lastSavedJPGOrientation)
             debugRow("Rotation Delta", String(format: "%.3f rad", camera.lastRotationChangeRadians))
             debugRow("View Change", String(format: "%.1f", camera.lastViewChangeScore))
             debugRow("Time Since Save", camera.timeSinceLastSaveText)

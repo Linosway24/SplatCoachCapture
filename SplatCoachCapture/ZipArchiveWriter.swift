@@ -7,6 +7,11 @@
 
 import Foundation
 
+struct ZipFileEntry {
+    let sourceURL: URL
+    let path: String
+}
+
 struct ZipDataEntry {
     let path: String
     let data: Data
@@ -14,25 +19,28 @@ struct ZipDataEntry {
 
 enum ZipArchiveWriter {
     static func write(
-        files: [URL],
+        fileEntries: [ZipFileEntry],
         dataEntries: [ZipDataEntry] = [],
         to archiveURL: URL,
-        rootFolderName: String
+        progress: ((Int, Int) -> Void)? = nil
     ) throws {
         var archive = Data()
         var centralDirectory = Data()
         var centralDirectoryEntries = 0
+        let totalEntries = fileEntries.count + dataEntries.count
+        var completedEntries = 0
 
-        for fileURL in files {
-            let fileData = try Data(contentsOf: fileURL)
-            let archivePath = "\(rootFolderName)/\(fileURL.lastPathComponent)"
+        for entry in fileEntries {
+            let fileData = try Data(contentsOf: entry.sourceURL)
             appendEntry(
-                path: archivePath,
+                path: entry.path,
                 data: fileData,
                 archive: &archive,
                 centralDirectory: &centralDirectory,
                 entryCount: &centralDirectoryEntries
             )
+            completedEntries += 1
+            progress?(completedEntries, totalEntries)
         }
 
         for entry in dataEntries {
@@ -43,6 +51,8 @@ enum ZipArchiveWriter {
                 centralDirectory: &centralDirectory,
                 entryCount: &centralDirectoryEntries
             )
+            completedEntries += 1
+            progress?(completedEntries, totalEntries)
         }
 
         let centralDirectoryOffset = UInt32(archive.count)
