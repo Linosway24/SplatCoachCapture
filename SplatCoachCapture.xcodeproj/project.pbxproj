@@ -256,6 +256,8 @@
 				DEVELOPMENT_TEAM = P54WN477NZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Splat Coach Capture needs camera access to preview and save scan frames.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Splat Coach Capture uses motion data to avoid saving frames while the phone is moving too fast.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -288,6 +290,8 @@
 				DEVELOPMENT_TEAM = P54WN477NZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Splat Coach Capture needs camera access to preview and save scan frames.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Splat Coach Capture uses motion data to avoid saving frames while the phone is moving too fast.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
