@@ -13,11 +13,12 @@ import Foundation
 import UIKit
 
 enum CaptureTuning {
-    static let minimumSaveInterval: TimeInterval = 0.75
+    static let minimumSaveInterval: TimeInterval = 0.4
     static let blurThreshold = 28.0
     static let maxRotationRate = 2.5
     static let maxAcceleration = 1.25
     static let minimumRotationChangeRadians = 0.08
+    static let minimumOverlapViewChangeScore = 1.0
     static let lumaSampleStep = 8
     static let signatureColumns = 12
     static let signatureRows = 8
@@ -41,10 +42,16 @@ final class CameraCaptureController: NSObject, ObservableObject {
     @Published private(set) var lastSaveReason = "None"
     @Published private(set) var lastRejectReason = "None"
     @Published private(set) var currentOrientationText = "Portrait"
+    @Published private(set) var lastDistanceMovedMeters = 0.0
+    @Published private(set) var lastMotionScore = 0.0
     @Published private(set) var lastViewChangeScore = 0.0
     @Published private(set) var lastRotationChangeRadians = 0.0
     @Published private(set) var lastSavedJPGOrientation = "None"
     @Published private(set) var captureFPS = 0.0
+    @Published private(set) var savedForOverlapCount = 0
+    @Published private(set) var savedNewAngleCount = 0
+    @Published private(set) var rejectedBlurryCount = 0
+    @Published private(set) var rejectedMotionCount = 0
     @Published private(set) var isExporting = false
     @Published private(set) var exportProgressText: String?
     @Published private(set) var exportErrorMessage: String?
@@ -53,7 +60,6 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
     private let sessionQueue = DispatchQueue(label: "com.splatcoach.capture.session")
     private let sampleQueue = DispatchQueue(label: "com.splatcoach.capture.samples", qos: .userInitiated)
-    private let imageContext = CIContext()
     private let motionManager = CMMotionManager()
 
     private var videoOutput: AVCaptureVideoDataOutput?
@@ -107,10 +113,16 @@ final class CameraCaptureController: NSObject, ObservableObject {
         framesSeen = 0
         framesRejected = 0
         lastBlurScore = nil
+        lastDistanceMovedMeters = 0
+        lastMotionScore = 0
         lastViewChangeScore = 0
         lastRotationChangeRadians = 0
         lastSavedJPGOrientation = "None"
         captureFPS = 0
+        savedForOverlapCount = 0
+        savedNewAngleCount = 0
+        rejectedBlurryCount = 0
+        rejectedMotionCount = 0
         frameIndex = 0
         lastSavedAt = .distantPast
         lastSavedFrameNumber = nil
@@ -351,24 +363,20 @@ final class CameraCaptureController: NSObject, ObservableObject {
         let frameNumber = framesSeen
         let motion = currentMotionSample()
         motionStatus = motion.status
-        lastRotationChangeRadians = motion.rotationDelta.isFinite ? motion.rotationDelta : 0
+        lastMotionScore = motion.magnitude
+
+        let poseChange = currentPoseChange(fallbackRotationDelta: motion.rotationDelta)
+        lastDistanceMovedMeters = poseChange.distance
+        lastRotationChangeRadians = poseChange.rotation
 
         let elapsed = now.timeIntervalSince(lastSavedAt)
         guard elapsed >= CaptureTuning.minimumSaveInterval else {
-            rejectFrame(
-                number: frameNumber,
-                timestamp: now,
-                reason: "Minimum interval",
-                orientation: captureOrientation,
-                blurScore: nil,
-                motion: motion,
-                viewChangeScore: nil
-            )
             return
         }
 
         guard motion.isAcceptable else {
             statusText = "Move slower"
+            rejectedMotionCount += 1
             rejectFrame(
                 number: frameNumber,
                 timestamp: now,
@@ -376,6 +384,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 orientation: captureOrientation,
                 blurScore: nil,
                 motion: motion,
+                poseChange: poseChange,
                 viewChangeScore: nil
             )
             return
@@ -389,6 +398,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 orientation: captureOrientation,
                 blurScore: nil,
                 motion: motion,
+                poseChange: poseChange,
                 viewChangeScore: nil
             )
             return
@@ -399,6 +409,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         let blurPasses = blurScore.map { $0 >= CaptureTuning.blurThreshold } ?? true
         guard blurPasses else {
             statusText = "Too blurry"
+            rejectedBlurryCount += 1
             rejectFrame(
                 number: frameNumber,
                 timestamp: now,
@@ -406,6 +417,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 orientation: captureOrientation,
                 blurScore: blurScore,
                 motion: motion,
+                poseChange: poseChange,
                 viewChangeScore: nil
             )
             return
@@ -416,23 +428,9 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastViewChangeScore = viewChangeScore.isFinite ? viewChangeScore : 0
 
         let isFirstSave = lastSavedSignature == nil
-        let rotationPasses = isFirstSave ||
-            motion.rotationDelta.isInfinite ||
-            motion.rotationDelta >= CaptureTuning.minimumRotationChangeRadians
-
-        guard rotationPasses else {
-            statusText = "Scanning"
-            rejectFrame(
-                number: frameNumber,
-                timestamp: now,
-                reason: "Rotation below threshold",
-                orientation: captureOrientation,
-                blurScore: blurScore,
-                motion: motion,
-                viewChangeScore: viewChangeScore
-            )
-            return
-        }
+        let rotatedEnough = poseChange.rotation >= CaptureTuning.minimumRotationChangeRadians
+        let viewChangedEnough = viewChangeScore.isInfinite ||
+            viewChangeScore >= CaptureTuning.minimumOverlapViewChangeScore
 
         saveFrame(
             pixelBuffer,
@@ -443,9 +441,31 @@ final class CameraCaptureController: NSObject, ObservableObject {
             orientation: captureOrientation,
             blurScore: blurScore,
             motion: motion,
+            poseChange: poseChange,
             viewChangeScore: viewChangeScore,
-            reason: isFirstSave ? "First good frame" : "Rotation threshold met"
+            reason: saveReason(
+                isFirstSave: isFirstSave,
+                rotatedEnough: rotatedEnough,
+                viewChangedEnough: viewChangedEnough
+            )
         )
+    }
+
+    private func currentPoseChange(fallbackRotationDelta: Double) -> PoseChange {
+        return PoseChange(
+            distance: 0,
+            rotation: fallbackRotationDelta.isFinite ? fallbackRotationDelta : 0
+        )
+    }
+
+    private func saveReason(isFirstSave: Bool, rotatedEnough: Bool, viewChangedEnough: Bool) -> String {
+        if !isFirstSave && (rotatedEnough || viewChangedEnough) {
+            savedNewAngleCount += 1
+            return rotatedEnough ? "Saved new angle - rotation" : "Saved new angle - view change"
+        }
+
+        savedForOverlapCount += 1
+        return isFirstSave ? "Saved overlap - first frame" : "Saved overlap"
     }
 
     private func rejectFrame(
@@ -455,6 +475,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         orientation: AVCaptureVideoOrientation,
         blurScore: Double?,
         motion: MotionSample,
+        poseChange: PoseChange,
         viewChangeScore: Double?
     ) {
         framesRejected += 1
@@ -469,7 +490,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 orientation: orientation.displayName,
                 blurScore: blurScore,
                 motionMagnitude: motion.magnitude,
-                rotationDelta: motion.rotationDelta.isFinite ? motion.rotationDelta : nil,
+                distanceMoved: poseChange.distance.finiteOrNil,
+                rotationDelta: poseChange.rotation.finiteOrNil,
                 viewChangeScore: viewChangeScore?.finiteOrNil
             )
         )
@@ -484,6 +506,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         orientation: AVCaptureVideoOrientation,
         blurScore: Double?,
         motion: MotionSample,
+        poseChange: PoseChange,
         viewChangeScore: Double,
         reason: String
     ) {
@@ -499,63 +522,56 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastSavedAttitude = attitude
         frameIndex += 1
 
-        let image = Self.imageForJPEG(from: pixelBuffer, orientation: orientation)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-
-        guard
-            let cgImage = imageContext.createCGImage(image, from: image.extent),
-            let data = UIImage(cgImage: cgImage, scale: 1, orientation: .up)
-                .jpegData(compressionQuality: CaptureTuning.jpegQuality)
-        else {
-            rejectFrame(
-                number: frameNumber,
-                timestamp: capturedAt,
-                reason: "JPEG encode failed",
-                orientation: orientation,
-                blurScore: blurScore,
-                motion: motion,
-                viewChangeScore: viewChangeScore
-            )
-            return
-        }
-
         let url = outputDirectory.appendingPathComponent(
             "splatcoach_frame_\(String(format: "%04d", frameIndex)).jpg"
         )
 
-        do {
-            try data.write(to: url, options: [.atomic])
-            savedFrameCount += 1
-            savedImageURLs.append(url)
-            lastSavedJPGOrientation = "\(orientation.displayName) \(Int(image.extent.width))x\(Int(image.extent.height))"
-            statusText = "Good frame"
-            lastSaveReason = reason
-            updateElapsedTime(capturedAt)
-            appendFrameEvent(
-                CaptureFrameEvent(
-                    frameNumber: frameNumber,
-                    timestamp: capturedAt,
-                    saved: true,
-                    saveReason: reason,
-                    rejectReason: nil,
-                    orientation: orientation.displayName,
-                    blurScore: blurScore,
-                    motionMagnitude: motion.magnitude,
-                    rotationDelta: motion.rotationDelta.isFinite ? motion.rotationDelta : nil,
-                    viewChangeScore: viewChangeScore.finiteOrNil
+        Task.detached(priority: .utility) { [pixelBuffer] in
+            do {
+                let result = try Self.writeJPEG(
+                    from: pixelBuffer,
+                    orientation: orientation,
+                    to: url
                 )
-            )
-        } catch {
-            rejectFrame(
-                number: frameNumber,
-                timestamp: capturedAt,
-                reason: "Save failed",
-                orientation: orientation,
-                blurScore: blurScore,
-                motion: motion,
-                viewChangeScore: viewChangeScore
-            )
-            statusText = "Save failed"
+
+                await MainActor.run {
+                    self.savedFrameCount += 1
+                    self.savedImageURLs.append(url)
+                    self.lastSavedJPGOrientation = "\(orientation.displayName) \(result.width)x\(result.height)"
+                    self.statusText = reason == "Saved for rotation" ? "Good new angle" : "Good frame"
+                    self.lastSaveReason = reason
+                    self.updateElapsedTime(capturedAt)
+                    self.appendFrameEvent(
+                        CaptureFrameEvent(
+                            frameNumber: frameNumber,
+                            timestamp: capturedAt,
+                            saved: true,
+                            saveReason: reason,
+                            rejectReason: nil,
+                            orientation: orientation.displayName,
+                            blurScore: blurScore,
+                            motionMagnitude: motion.magnitude,
+                            distanceMoved: poseChange.distance.finiteOrNil,
+                            rotationDelta: poseChange.rotation.finiteOrNil,
+                            viewChangeScore: viewChangeScore.finiteOrNil
+                        )
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.rejectFrame(
+                        number: frameNumber,
+                        timestamp: capturedAt,
+                        reason: "Save failed",
+                        orientation: orientation,
+                        blurScore: blurScore,
+                        motion: motion,
+                        poseChange: poseChange,
+                        viewChangeScore: viewChangeScore
+                    )
+                    self.statusText = "Save failed"
+                }
+            }
         }
     }
 
@@ -608,6 +624,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 maxRotationRate: CaptureTuning.maxRotationRate,
                 maxAcceleration: CaptureTuning.maxAcceleration,
                 minimumRotationChangeRadians: CaptureTuning.minimumRotationChangeRadians,
+                minimumOverlapViewChangeScore: CaptureTuning.minimumOverlapViewChangeScore,
                 jpegQuality: CaptureTuning.jpegQuality
             ),
             averageBlurScore: frameEvents.compactMap(\.blurScore).average,
@@ -717,7 +734,27 @@ final class CameraCaptureController: NSObject, ObservableObject {
         return totalDifference / Double(current.count)
     }
 
-    private static func imageForJPEG(
+    nonisolated private static func writeJPEG(
+        from pixelBuffer: CVPixelBuffer,
+        orientation: AVCaptureVideoOrientation,
+        to url: URL
+    ) throws -> SavedJPEGResult {
+        let image = imageForJPEG(from: pixelBuffer, orientation: orientation)
+        let context = CIContext()
+
+        guard
+            let cgImage = context.createCGImage(image, from: image.extent),
+            let data = UIImage(cgImage: cgImage, scale: 1, orientation: .up)
+                .jpegData(compressionQuality: CaptureTuning.jpegQuality)
+        else {
+            throw CaptureSaveError.jpegEncodeFailed
+        }
+
+        try data.write(to: url, options: [.atomic])
+        return SavedJPEGResult(width: Int(image.extent.width), height: Int(image.extent.height))
+    }
+
+    nonisolated private static func imageForJPEG(
         from pixelBuffer: CVPixelBuffer,
         orientation: AVCaptureVideoOrientation
     ) -> CIImage {
@@ -735,12 +772,26 @@ final class CameraCaptureController: NSObject, ObservableObject {
     }
 }
 
+private enum CaptureSaveError: Error {
+    case jpegEncodeFailed
+}
+
+private struct SavedJPEGResult {
+    let width: Int
+    let height: Int
+}
+
 private struct MotionSample {
     let isAcceptable: Bool
     let status: String
     let attitude: CMAttitude?
     let rotationDelta: Double
     let magnitude: Double
+}
+
+private struct PoseChange {
+    let distance: Double
+    let rotation: Double
 }
 
 struct CaptureReport: Encodable {
@@ -769,6 +820,7 @@ struct CaptureSettings: Encodable {
     let maxRotationRate: Double
     let maxAcceleration: Double
     let minimumRotationChangeRadians: Double
+    let minimumOverlapViewChangeScore: Double
     let jpegQuality: Double
 }
 
@@ -781,6 +833,7 @@ struct CaptureFrameEvent: Encodable {
     let orientation: String
     let blurScore: Double?
     let motionMagnitude: Double
+    let distanceMoved: Double?
     let rotationDelta: Double?
     let viewChangeScore: Double?
 }
@@ -910,6 +963,7 @@ private extension CaptureFrameEvent {
             orientation: orientation,
             blurScore: blurScore?.finiteOrNil,
             motionMagnitude: motionMagnitude.isFinite ? motionMagnitude : 0,
+            distanceMoved: distanceMoved?.finiteOrNil,
             rotationDelta: rotationDelta?.finiteOrNil,
             viewChangeScore: viewChangeScore?.finiteOrNil
         )

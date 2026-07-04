@@ -261,10 +261,16 @@ struct ContentView: View {
 
             debugRow("Frames Seen", "\(camera.framesSeen)")
             debugRow("Frames Saved", "\(camera.savedFrameCount)")
+            debugRow("Overlap Frames", "\(camera.savedForOverlapCount)")
+            debugRow("New Angle Frames", "\(camera.savedNewAngleCount)")
+            debugRow("Rejected Blurry", "\(camera.rejectedBlurryCount)")
+            debugRow("Rejected Motion", "\(camera.rejectedMotionCount)")
             debugRow("Blur Score", camera.lastBlurScore.map { String(format: "%.1f", $0) } ?? "Unavailable")
+            debugRow("Motion Score", String(format: "%.3f", camera.lastMotionScore))
             debugRow("Motion Status", camera.motionStatus)
             debugRow("Current Orientation", camera.currentOrientationText)
             debugRow("Last JPG Orientation", camera.lastSavedJPGOrientation)
+            debugRow("Distance Moved", String(format: "%.3f m", camera.lastDistanceMovedMeters))
             debugRow("Rotation Delta", String(format: "%.3f rad", camera.lastRotationChangeRadians))
             debugRow("View Change", String(format: "%.1f", camera.lastViewChangeScore))
             debugRow("Time Since Save", camera.timeSinceLastSaveText)
@@ -297,6 +303,7 @@ struct ContentView: View {
         feedbackOpacity = 1
 
         let shouldFade = status == "Good frame" ||
+            status == "Good new angle" ||
             status == "Move slower" ||
             status == "Too blurry" ||
             status == "Save failed"
@@ -315,6 +322,8 @@ struct ContentView: View {
         switch status {
         case "Good frame":
             "GOOD FRAME"
+        case "Good new angle":
+            "GOOD NEW ANGLE"
         case "Move slower":
             "MOVE SLOWER"
         case "Too blurry":
