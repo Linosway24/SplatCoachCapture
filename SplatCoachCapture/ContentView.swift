@@ -46,6 +46,14 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea()
 
+                if camera.isScanning {
+                    MissionView(manager: camera.missionManager)
+                        .padding(.horizontal, 14)
+                        .padding(.top, proxy.safeAreaInsets.top + 74)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
                 if isDebugVisible {
                     debugOverlay
                         .padding(.horizontal, 14)

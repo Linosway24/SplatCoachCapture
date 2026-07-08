@@ -44,6 +44,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
     @Published private(set) var currentOrientationText = "Portrait"
     @Published private(set) var lastDistanceMovedMeters = 0.0
     @Published private(set) var lastMotionScore = 0.0
+    @Published private(set) var lastLinearAccelerationMagnitude = 0.0
+    @Published private(set) var lastRotationRateMagnitude = 0.0
     @Published private(set) var lastViewChangeScore = 0.0
     @Published private(set) var lastRotationChangeRadians = 0.0
     @Published private(set) var lastSavedJPGOrientation = "None"
@@ -81,6 +83,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
     @Published private(set) var exportErrorMessage: String?
 
     let session = AVCaptureSession()
+    let missionManager = MissionManager()
 
     var currentUIState: String {
         currentScanHealth.rawValue
@@ -109,6 +112,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
     private var scanHealthLastUpdatedAt: Date?
     private var pendingScanHealth: ScanHealthAssessment?
     private var pendingScanHealthStartedAt: Date?
+    private var movementEvidenceTracker = MovementEvidenceTracker()
+    private var movementEvidenceSnapshot: MovementEvidenceSnapshot = .empty
 
     override init() {
         super.init()
@@ -155,6 +160,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastBlurScore = nil
         lastDistanceMovedMeters = 0
         lastMotionScore = 0
+        lastLinearAccelerationMagnitude = 0
+        lastRotationRateMagnitude = 0
         lastViewChangeScore = 0
         lastRotationChangeRadians = 0
         lastSavedJPGOrientation = "None"
@@ -201,6 +208,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         scanHealthLastUpdatedAt = startedAt
         pendingScanHealth = nil
         pendingScanHealthStartedAt = nil
+        movementEvidenceTracker.reset()
+        movementEvidenceSnapshot = .empty
         fpsWindowStartedAt = startedAt
         fpsWindowFrameCount = 0
         isScanning = true
@@ -208,6 +217,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastSaveReason = "None"
         lastRejectReason = "None"
         timeSinceLastSaveText = "--"
+        missionManager.startScan()
+        updateMissionTelemetry()
         startMotionUpdates()
         updateCaptureOrientation()
         persistWorkingScanMetadata()
@@ -231,6 +242,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         pendingScanHealth = nil
         pendingScanHealthStartedAt = nil
         scanHealthLastUpdatedAt = endedAt
+        missionManager.stopScan()
         postScanReport = makeCaptureIntelligenceSummary(endedAt: endedAt)
         liveCoachingText = postScanReport?.recommendation ?? "Ready"
         motionManager.stopDeviceMotionUpdates()
@@ -247,6 +259,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 try FileManager.default.removeItem(at: workingScanDirectory)
             }
             resetInMemoryScanState()
+            missionManager.reset()
             storageErrorMessage = nil
         } catch {
             storageErrorMessage = "Reset failed: \(error.localizedDescription)"
@@ -416,7 +429,15 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
     private func currentMotionSample() -> MotionSample {
         guard let motion = motionManager.deviceMotion else {
-            return MotionSample(isAcceptable: true, status: "OK", attitude: nil, rotationDelta: .infinity, magnitude: 0)
+            return MotionSample(
+                isAcceptable: true,
+                status: "OK",
+                attitude: nil,
+                rotationDelta: .infinity,
+                magnitude: 0,
+                linearAccelerationMagnitude: 0,
+                rotationRateMagnitude: 0
+            )
         }
 
         let rotation = motion.rotationRate
@@ -448,7 +469,9 @@ final class CameraCaptureController: NSObject, ObservableObject {
             status: isAcceptable ? "OK" : "Too fast",
             attitude: motion.attitude.copy() as? CMAttitude,
             rotationDelta: attitudeDelta,
-            magnitude: max(rotationMagnitude, accelerationMagnitude)
+            magnitude: max(rotationMagnitude, accelerationMagnitude),
+            linearAccelerationMagnitude: accelerationMagnitude,
+            rotationRateMagnitude: rotationMagnitude
         )
     }
 
@@ -555,6 +578,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastRejectReason = "None"
         lastDistanceMovedMeters = 0
         lastMotionScore = 0
+        lastLinearAccelerationMagnitude = 0
+        lastRotationRateMagnitude = 0
         lastViewChangeScore = 0
         lastRotationChangeRadians = 0
         lastSavedJPGOrientation = "None"
@@ -601,6 +626,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         scanHealthLastUpdatedAt = nil
         pendingScanHealth = nil
         pendingScanHealthStartedAt = nil
+        movementEvidenceTracker.reset()
+        movementEvidenceSnapshot = .empty
         fpsWindowStartedAt = nil
         fpsWindowFrameCount = 0
         isScanning = false
@@ -656,11 +683,28 @@ final class CameraCaptureController: NSObject, ObservableObject {
         framesSeen += 1
         updateCaptureFPS(now)
         updateElapsedTime(now)
+        var missionMotion: MotionSample?
+        var missionPoseChange: PoseChange?
+        var missionViewChangeScore: Double?
+        defer {
+            if let missionMotion, let missionPoseChange {
+                updateMovementEvidence(
+                    at: now,
+                    motion: missionMotion,
+                    poseChange: missionPoseChange,
+                    viewChangeScore: missionViewChangeScore
+                )
+            }
+            updateMissionTelemetry()
+        }
 
         let frameNumber = framesSeen
         let motion = currentMotionSample()
+        missionMotion = motion
         motionStatus = motion.status
         lastMotionScore = motion.magnitude
+        lastLinearAccelerationMagnitude = motion.linearAccelerationMagnitude
+        lastRotationRateMagnitude = motion.rotationRateMagnitude
 
         let elapsed = now.timeIntervalSince(lastSavedAt)
         let timeSinceLastSaved = lastSavedAt == .distantPast ? nil : elapsed
@@ -668,6 +712,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             fallbackRotationDelta: motion.rotationDelta,
             timeSinceLastSaved: timeSinceLastSaved
         )
+        missionPoseChange = poseChange
         lastDistanceMovedMeters = poseChange.distance
         lastRotationChangeRadians = poseChange.rotation
 
@@ -824,6 +869,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
         let signature = Self.lumaSignature(for: pixelBuffer)
         let viewChangeScore = Self.viewChangeScore(previous: lastSavedSignature, current: signature)
+        missionViewChangeScore = viewChangeScore
         lastViewChangeScore = viewChangeScore.isFinite ? viewChangeScore : 0
 
         let isFirstSave = lastSavedSignature == nil
@@ -1102,6 +1148,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                             scanHealth: scanHealth.rawValue
                         )
                     )
+                    self.updateMissionTelemetry()
                     self.persistWorkingScanMetadata()
                 }
             } catch {
@@ -1205,6 +1252,55 @@ final class CameraCaptureController: NSObject, ObservableObject {
         captureFPS = Double(fpsWindowFrameCount) / elapsed
         self.fpsWindowStartedAt = now
         fpsWindowFrameCount = 0
+    }
+
+    private func updateMissionTelemetry() {
+        missionManager.update(
+            with: MissionTelemetry(
+                isScanning: isScanning,
+                framesSeen: framesSeen,
+                savedFrameCount: savedFrameCount,
+                savedNewAngleCount: savedNewAngleCount,
+                savedOverlapCount: savedForOverlapCount,
+                rejectedMotionCount: rejectedMotionCount,
+                rejectedBlurryCount: rejectedBlurryCount,
+                framesRejectedDueToPoorHealth: framesRejectedDueToPoorHealth,
+                scanConfidenceScore: scanConfidenceScore,
+                currentScanHealth: currentScanHealth,
+                linearAccelerationMagnitude: lastLinearAccelerationMagnitude,
+                rotationRateMagnitude: lastRotationRateMagnitude,
+                recentLinearMotionImpulse: movementEvidenceSnapshot.recentLinearMotionImpulse,
+                recentRotationImpulse: movementEvidenceSnapshot.recentRotationImpulse,
+                rotationDominance: movementEvidenceSnapshot.rotationDominance,
+                movementClassification: movementEvidenceSnapshot.movementClassification,
+                translationEvidenceLevel: movementEvidenceSnapshot.translationEvidenceLevel,
+                lastMotionScore: lastMotionScore,
+                lastViewChangeScore: lastViewChangeScore,
+                lastRotationChangeRadians: lastRotationChangeRadians,
+                captureFPS: captureFPS,
+                timeInCapturing: timeInCapturing,
+                timeInCoach: timeInCoach,
+                timeInHold: timeInHold,
+                timeInLost: timeInLost
+            )
+        )
+    }
+
+    private func updateMovementEvidence(
+        at timestamp: Date,
+        motion: MotionSample,
+        poseChange: PoseChange,
+        viewChangeScore: Double?
+    ) {
+        movementEvidenceSnapshot = movementEvidenceTracker.record(
+            timestamp: timestamp,
+            linearAccelerationMagnitude: motion.linearAccelerationMagnitude,
+            rotationRateMagnitude: motion.rotationRateMagnitude,
+            attitudeRotationDelta: poseChange.rotation,
+            savedFrameCount: savedFrameCount,
+            savedNewAngleCount: savedNewAngleCount,
+            viewChangeScore: viewChangeScore
+        )
     }
 
     private func makeCaptureReportData() throws -> Data {
@@ -2138,6 +2234,8 @@ private struct MotionSample {
     let attitude: CMAttitude?
     let rotationDelta: Double
     let magnitude: Double
+    let linearAccelerationMagnitude: Double
+    let rotationRateMagnitude: Double
 }
 
 private struct PoseChange {
@@ -2259,7 +2357,7 @@ private struct FrameQualitySummary {
     let predictedSplatQuality: String
 }
 
-enum ScanHealthState: String, Encodable {
+enum ScanHealthState: String, Encodable, Equatable {
     case ready
     case capturing
     case coach
