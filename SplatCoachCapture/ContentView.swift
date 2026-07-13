@@ -22,7 +22,11 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                CameraPreviewView(session: camera.session, orientation: camera.captureOrientation)
+                CameraPreviewView(
+                    session: camera.session,
+                    orientation: camera.captureOrientation,
+                    onTapToFocus: camera.focus
+                )
                     .ignoresSafeArea()
 
                 scanHealthBorder
@@ -47,7 +51,10 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
                 if camera.isScanning {
-                    MissionView(manager: camera.missionManager)
+                    VStack(alignment: .leading, spacing: 10) {
+                        MissionView(manager: camera.missionManager)
+                        CoverageView(manager: camera.coverageManager)
+                    }
                         .padding(.horizontal, 14)
                         .padding(.top, proxy.safeAreaInsets.top + 74)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -77,6 +84,9 @@ struct ContentView: View {
                 isShowingPreviousScanPrompt = true
             }
         }
+        .onDisappear {
+            camera.captureViewDidDisappear()
+        }
         .onChange(of: camera.statusText) { _, newStatus in
             showFeedback(for: newStatus)
         }
@@ -92,10 +102,7 @@ struct ContentView: View {
         }
         .alert(
             "Export Failed",
-            isPresented: Binding(
-                get: { camera.exportErrorMessage != nil },
-                set: { if !$0 { camera.clearExportError() } }
-            )
+            isPresented: isExportErrorPresented
         ) {
             Button("OK", role: .cancel) {
                 camera.clearExportError()
@@ -131,10 +138,7 @@ struct ContentView: View {
         }
         .alert(
             "Storage Error",
-            isPresented: Binding(
-                get: { camera.storageErrorMessage != nil },
-                set: { if !$0 { camera.clearStorageError() } }
-            )
+            isPresented: isStorageErrorPresented
         ) {
             Button("OK", role: .cancel) {
                 camera.clearStorageError()
@@ -142,6 +146,20 @@ struct ContentView: View {
         } message: {
             Text(camera.storageErrorMessage ?? "The scan storage action could not be completed.")
         }
+    }
+
+    private var isExportErrorPresented: Binding<Bool> {
+        Binding(
+            get: { camera.exportErrorMessage != nil },
+            set: { if !$0 { camera.clearExportError() } }
+        )
+    }
+
+    private var isStorageErrorPresented: Binding<Bool> {
+        Binding(
+            get: { camera.storageErrorMessage != nil },
+            set: { if !$0 { camera.clearStorageError() } }
+        )
     }
 
     private var overlayGradient: some View {
@@ -394,6 +412,10 @@ struct ContentView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.86))
 
+                Text(camera.coverageManager.summary.recommendation.text)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange.opacity(0.92))
+
                 VStack(spacing: 5) {
                     reportRow("Duration", formattedDuration(report.captureDuration))
                     reportRow("Frames", "\(report.framesSaved) saved / \(report.framesSeen) seen")
@@ -402,6 +424,12 @@ struct ContentView: View {
                     reportRow("Dominant health", "\(report.dominantScanHealth.capitalized) \(String(format: "%.0f%%", report.dominantScanHealthPercent))")
                     reportRow("Final active", report.finalActiveScanHealth.capitalized)
                     reportRow("COLMAP", report.estimatedCOLMAPReadiness)
+                    ForEach(camera.coverageManager.summary.sectors) { sector in
+                        reportRow(
+                            sector.title,
+                            "\(sector.level.title) · S\(sector.savedFrames) A\(sector.newAngleFrames)"
+                        )
+                    }
                 }
                 .font(.caption.monospacedDigit())
             }

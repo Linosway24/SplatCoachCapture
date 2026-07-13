@@ -84,6 +84,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
     let session = AVCaptureSession()
     let missionManager = MissionManager()
+    let coverageManager = CoverageManager()
 
     var currentUIState: String {
         currentScanHealth.rawValue
@@ -93,8 +94,10 @@ final class CameraCaptureController: NSObject, ObservableObject {
     private let sampleQueue = DispatchQueue(label: "com.splatcoach.capture.samples", qos: .userInitiated)
     private let motionManager = CMMotionManager()
     private let motionTrackingProvider: MotionTrackingProvider = CoreMotionProvider()
+    private let idleTimerCoordinator = CaptureIdleTimerCoordinator()
 
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var captureDevice: AVCaptureDevice?
     private var lastSavedAt = Date.distantPast
     private var frameIndex = 0
     private var outputDirectory: URL?
@@ -117,6 +120,19 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        idleTimerCoordinator.setSceneActive(UIApplication.shared.applicationState == .active)
         recoverWorkingScanIfAvailable()
     }
 
@@ -128,6 +144,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
     }
 
     func prepareCamera() async {
+        idleTimerCoordinator.setCaptureViewVisible(true)
         beginOrientationTracking()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -213,12 +230,15 @@ final class CameraCaptureController: NSObject, ObservableObject {
         fpsWindowStartedAt = startedAt
         fpsWindowFrameCount = 0
         isScanning = true
+        idleTimerCoordinator.setScanning(true)
         statusText = "Scanning"
         lastSaveReason = "None"
         lastRejectReason = "None"
         timeSinceLastSaveText = "--"
         missionManager.startScan()
+        coverageManager.startScan(initialAttitude: motionManager.deviceMotion?.attitude)
         updateMissionTelemetry()
+        updateCoverageTelemetry(timestamp: startedAt)
         startMotionUpdates()
         updateCaptureOrientation()
         persistWorkingScanMetadata()
@@ -230,6 +250,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         finalActiveScanHealth = currentScanHealth.rawValue
         updateDominantScanHealthSummary()
         isScanning = false
+        idleTimerCoordinator.setScanning(false)
         scanEndedAt = endedAt
         statusText = "Ready"
         currentScanHealth = .ready
@@ -243,6 +264,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         pendingScanHealthStartedAt = nil
         scanHealthLastUpdatedAt = endedAt
         missionManager.stopScan()
+        coverageManager.stopScan()
         postScanReport = makeCaptureIntelligenceSummary(endedAt: endedAt)
         liveCoachingText = postScanReport?.recommendation ?? "Ready"
         motionManager.stopDeviceMotionUpdates()
@@ -260,6 +282,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             }
             resetInMemoryScanState()
             missionManager.reset()
+            coverageManager.reset()
             storageErrorMessage = nil
         } catch {
             storageErrorMessage = "Reset failed: \(error.localizedDescription)"
@@ -282,6 +305,18 @@ final class CameraCaptureController: NSObject, ObservableObject {
     func clearExportProgress() {
         guard !isExporting else { return }
         exportProgressText = nil
+    }
+
+    func captureViewDidDisappear() {
+        idleTimerCoordinator.setCaptureViewVisible(false)
+    }
+
+    @objc private func applicationDidBecomeActive() {
+        idleTimerCoordinator.setSceneActive(true)
+    }
+
+    @objc private func applicationWillResignActive() {
+        idleTimerCoordinator.setSceneActive(false)
     }
 
     func makeExportArchive() async -> URL? {
@@ -316,13 +351,17 @@ final class CameraCaptureController: NSObject, ObservableObject {
             let reportData = try makeCaptureReportData()
             let diagnosticsJSONData = try makeCaptureDiagnosticsJSONData()
             let diagnosticsCSVData = try makeCaptureDiagnosticsCSVData()
+            let coverageDiagnosticsJSONData = try makeCoverageDiagnosticsJSONData()
+            let coverageDiagnosticsCSVData = try makeCoverageDiagnosticsCSVData()
             try await Task.detached(priority: .userInitiated) { [weak self] in
                 try ZipArchiveWriter.write(
                     fileEntries: imageEntries,
                     dataEntries: [
                         ZipDataEntry(path: "capture_report.json", data: reportData),
                         ZipDataEntry(path: "capture_diagnostics.json", data: diagnosticsJSONData),
-                        ZipDataEntry(path: "capture_diagnostics.csv", data: diagnosticsCSVData)
+                        ZipDataEntry(path: "capture_diagnostics.csv", data: diagnosticsCSVData),
+                        ZipDataEntry(path: "coverage_diagnostics.json", data: coverageDiagnosticsJSONData),
+                        ZipDataEntry(path: "coverage_diagnostics.csv", data: coverageDiagnosticsCSVData)
                     ],
                     to: archiveURL
                 ) { completed, total in
@@ -347,6 +386,34 @@ final class CameraCaptureController: NSObject, ObservableObject {
         }
     }
 
+    func focus(at devicePoint: CGPoint) {
+        guard let device = captureDevice else { return }
+        let normalizedPoint = CGPoint(
+            x: min(max(devicePoint.x, 0), 1),
+            y: min(max(devicePoint.y, 0), 1)
+        )
+
+        sessionQueue.async {
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = normalizedPoint
+                }
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                } else if device.isFocusModeSupported(.autoFocus) {
+                    device.focusMode = .autoFocus
+                }
+            } catch {
+                Task { @MainActor in
+                    self.lastRejectReason = "Tap focus unavailable"
+                }
+            }
+        }
+    }
+
     private func configureSession() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -367,6 +434,26 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 return
             }
 
+            do {
+                try camera.lockForConfiguration()
+                if camera.isFocusPointOfInterestSupported {
+                    camera.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+                }
+                if camera.isFocusModeSupported(.continuousAutoFocus) {
+                    camera.focusMode = .continuousAutoFocus
+                } else if camera.isFocusModeSupported(.autoFocus) {
+                    camera.focusMode = .autoFocus
+                }
+                if camera.isSmoothAutoFocusSupported {
+                    camera.isSmoothAutoFocusEnabled = true
+                }
+                camera.unlockForConfiguration()
+            } catch {
+                Task { @MainActor in
+                    self.lastRejectReason = "Focus configuration unavailable"
+                }
+            }
+
             self.session.addInput(input)
 
             let output = AVCaptureVideoDataOutput()
@@ -385,6 +472,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             self.session.startRunning()
 
             Task { @MainActor in
+                self.captureDevice = camera
                 self.isReady = true
                 self.statusText = "Ready"
                 self.updateCaptureOrientation()
@@ -498,6 +586,11 @@ final class CameraCaptureController: NSObject, ObservableObject {
     private var workingScanDiagnosticsCSVURL: URL {
         workingScanDirectory
             .appendingPathComponent("capture_diagnostics.csv")
+    }
+
+    private var workingScanCoverageDiagnosticsURL: URL {
+        workingScanDirectory
+            .appendingPathComponent("coverage_diagnostics.json")
     }
 
     private var workingScanStateURL: URL {
@@ -646,6 +739,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 .write(to: workingScanDiagnosticsJSONURL, options: [.atomic])
             try makeCaptureDiagnosticsCSVData()
                 .write(to: workingScanDiagnosticsCSVURL, options: [.atomic])
+            try makeCoverageDiagnosticsJSONData()
+                .write(to: workingScanCoverageDiagnosticsURL, options: [.atomic])
 
             let state = WorkingScanState(
                 savedImagePaths: savedImageURLs.map(\.path),
@@ -696,6 +791,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 )
             }
             updateMissionTelemetry()
+            updateCoverageTelemetry(timestamp: now)
         }
 
         let frameNumber = framesSeen
@@ -1149,6 +1245,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
                         )
                     )
                     self.updateMissionTelemetry()
+                    self.updateCoverageTelemetry(timestamp: capturedAt)
                     self.persistWorkingScanMetadata()
                 }
             } catch {
@@ -1203,6 +1300,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         scanHealth: ScanHealthState,
         frameQuality: FrameQualityAssessment
     ) {
+        let focus = currentFocusDiagnostic()
         motionDiagnostics.append(
             CaptureMotionDiagnostic(
                 frameNumber: frameNumber,
@@ -1224,8 +1322,23 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 splatQualityScore: frameQuality.splatQualityScore,
                 rejectionReason: frameQuality.rejectionReason,
                 qualityReason: frameQuality.qualityReason,
-                scanHealth: scanHealth.rawValue
+                scanHealth: scanHealth.rawValue,
+                focusMode: focus.mode,
+                isAdjustingFocus: focus.isAdjusting,
+                lensPosition: focus.lensPosition
             )
+        )
+    }
+
+    private func currentFocusDiagnostic() -> FocusDiagnosticSnapshot {
+        guard let captureDevice else {
+            return FocusDiagnosticSnapshot(mode: "unavailable", isAdjusting: false, lensPosition: nil)
+        }
+
+        return FocusDiagnosticSnapshot(
+            mode: captureDevice.focusMode.diagnosticName,
+            isAdjusting: captureDevice.isAdjustingFocus,
+            lensPosition: Double(captureDevice.lensPosition)
         )
     }
 
@@ -1303,6 +1416,21 @@ final class CameraCaptureController: NSObject, ObservableObject {
         )
     }
 
+    private func updateCoverageTelemetry(timestamp: Date) {
+        coverageManager.update(
+            with: CoverageTelemetry(
+                timestamp: timestamp,
+                isScanning: isScanning,
+                yawRadians: motionManager.deviceMotion?.attitude.yaw,
+                savedFrameCount: savedFrameCount,
+                savedNewAngleCount: savedNewAngleCount,
+                currentScanHealth: currentScanHealth,
+                movementClassification: movementEvidenceSnapshot.movementClassification,
+                viewChangeScore: lastViewChangeScore
+            )
+        )
+    }
+
     private func makeCaptureReportData() throws -> Data {
         let summary = makeCaptureIntelligenceSummary(endedAt: scanEndedAt ?? Date())
         let translationSummary = makeTranslationDiagnosticsSummary()
@@ -1369,6 +1497,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             rejectedFrameCount: frameQualitySummary.rejectedFrameCount,
             percentExcellent: frameQualitySummary.percentExcellent,
             predictedSplatQuality: frameQualitySummary.predictedSplatQuality,
+            coverage: coverageManager.diagnostics,
             captureIntelligence: summary,
             perFrame: frameEvents.map(\.jsonSafe)
         )
@@ -1407,7 +1536,10 @@ final class CameraCaptureController: NSObject, ObservableObject {
             "splatQualityScore",
             "rejectionReason",
             "qualityReason",
-            "scanHealth"
+            "scanHealth",
+            "focusMode",
+            "isAdjustingFocus",
+            "lensPosition"
         ].joined(separator: ",")
 
         let formatter = ISO8601DateFormatter()
@@ -1432,7 +1564,10 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 "\(diagnostic.splatQualityScore)",
                 diagnostic.rejectionReason ?? "",
                 diagnostic.qualityReason,
-                diagnostic.scanHealth
+                diagnostic.scanHealth,
+                diagnostic.focusMode,
+                diagnostic.isAdjustingFocus ? "true" : "false",
+                Self.csvNumber(diagnostic.lensPosition)
             ]
             .map(Self.csvEscape)
             .joined(separator: ",")
@@ -1443,6 +1578,50 @@ final class CameraCaptureController: NSObject, ObservableObject {
             throw CaptureDiagnosticsError.csvEncodingFailed
         }
 
+        return data
+    }
+
+    private func makeCoverageDiagnosticsJSONData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(coverageManager.diagnostics)
+    }
+
+    private func makeCoverageDiagnosticsCSVData() throws -> Data {
+        let header = [
+            "sector",
+            "level",
+            "weightedSavedFrames",
+            "weightedNewAngleFrames",
+            "weightedStableFrames",
+            "weightedViewChangeTotal",
+            "lastUpdatedAt",
+            "rationale",
+            "recommendation"
+        ].joined(separator: ",")
+        let formatter = ISO8601DateFormatter()
+        let diagnostics = coverageManager.diagnostics
+        let rows = diagnostics.summary.sectors.map { sector in
+            [
+                sector.title,
+                sector.level.title,
+                "\(sector.savedFrames)",
+                "\(sector.newAngleFrames)",
+                "\(sector.stableFrames)",
+                Self.csvNumber(sector.viewChangeTotal),
+                sector.lastUpdatedAt.map(formatter.string(from:)) ?? "",
+                sector.rationale,
+                diagnostics.summary.recommendation.text
+            ]
+            .map(Self.csvEscape)
+            .joined(separator: ",")
+        }
+
+        let csv = ([header] + rows).joined(separator: "\n") + "\n"
+        guard let data = csv.data(using: .utf8) else {
+            throw CaptureDiagnosticsError.csvEncodingFailed
+        }
         return data
     }
 
@@ -2357,6 +2536,12 @@ private struct FrameQualitySummary {
     let predictedSplatQuality: String
 }
 
+private struct FocusDiagnosticSnapshot {
+    let mode: String
+    let isAdjusting: Bool
+    let lensPosition: Double?
+}
+
 enum ScanHealthState: String, Encodable, Equatable {
     case ready
     case capturing
@@ -2439,6 +2624,7 @@ struct CaptureReport: Encodable {
     let rejectedFrameCount: Int
     let percentExcellent: Double
     let predictedSplatQuality: String
+    let coverage: CoverageDiagnostics
     let captureIntelligence: CaptureIntelligenceSummary
     let perFrame: [CaptureFrameEvent]
 }
@@ -2569,6 +2755,9 @@ struct CaptureMotionDiagnostic: Encodable {
     let rejectionReason: String?
     let qualityReason: String
     let scanHealth: String
+    let focusMode: String
+    let isAdjustingFocus: Bool
+    let lensPosition: Double?
 }
 
 struct WorkingScanState: Encodable {
@@ -2591,6 +2780,17 @@ private extension AVCaptureConnection {
     func setOrientationIfSupported(_ orientation: AVCaptureVideoOrientation) {
         guard isVideoOrientationSupported else { return }
         videoOrientation = orientation
+    }
+}
+
+private extension AVCaptureDevice.FocusMode {
+    var diagnosticName: String {
+        switch self {
+        case .locked: "locked"
+        case .autoFocus: "autoFocus"
+        case .continuousAutoFocus: "continuousAutoFocus"
+        @unknown default: "unknown"
+        }
     }
 }
 
@@ -2779,7 +2979,10 @@ private extension CaptureMotionDiagnostic {
             splatQualityScore: splatQualityScore,
             rejectionReason: rejectionReason,
             qualityReason: qualityReason,
-            scanHealth: scanHealth
+            scanHealth: scanHealth,
+            focusMode: focusMode,
+            isAdjustingFocus: isAdjustingFocus,
+            lensPosition: lensPosition?.finiteOrNil
         )
     }
 }
