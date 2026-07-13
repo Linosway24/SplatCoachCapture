@@ -68,7 +68,7 @@ enum CoverageRecommendationPriority: String, Equatable, Codable {
     case complete
 }
 
-struct CoverageSector: Identifiable, Equatable {
+struct CoverageSector: Identifiable, Equatable, Codable {
     let id: CoverageSectorID
     let title: String
     let startDegrees: Double
@@ -133,6 +133,13 @@ enum CoverageTuning {
     static let strongStableFrames = 8
 
     static let methodology = "relative-yaw-four-sector-v1"
+    static let controlledTestProcedure = [
+        "Face the intended start wall and hold for 10 seconds.",
+        "Rotate 90 degrees right and hold for 10 seconds.",
+        "Rotate another 90 degrees right and hold for 10 seconds.",
+        "Rotate another 90 degrees right and hold for 10 seconds.",
+        "Return to the start direction and hold long enough to confirm wraparound."
+    ]
     static let assumptions = [
         "The phone is aimed at the intended start wall when the first usable yaw is recorded.",
         "Four equal 90-degree yaw sectors approximate room sides; they do not reconstruct room geometry.",
@@ -145,7 +152,34 @@ struct CoverageDiagnostics: Codable, Equatable {
     let methodology: String
     let assumptions: [String]
     let thresholds: CoverageThresholds
+    let sectorBoundaries: [CoverageSector]
+    let controlledTestProcedure: [String]
     let summary: CoverageSummary
+    let perFrame: [CoverageFrameDiagnostic]
+}
+
+struct CoverageFrameDiagnostic: Codable, Equatable {
+    let frameNumber: Int
+    let timestamp: Date
+    let absoluteYawRadians: Double?
+    let absoluteYawDegrees: Double?
+    let startYawRadians: Double?
+    let startYawDegrees: Double?
+    let startRelativeYawRadians: Double?
+    let startRelativeYawDegrees: Double?
+    let normalizedYawDegrees: Double?
+    let assignedSector: CoverageSectorID?
+    let assignedSectorStartDegrees: Double?
+    let assignedSectorEndDegrees: Double?
+    let saved: Bool
+    let excluded: Bool
+    let exclusionReason: String?
+    let evidenceWeight: Double
+    let viewChangeScore: Double?
+    let newAngleDecision: Bool
+    let overlapDecision: Bool
+    let movementClassification: MovementClassification
+    let scanHealth: String
 }
 
 struct CoverageThresholds: Codable, Equatable {

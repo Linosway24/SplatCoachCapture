@@ -324,7 +324,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
         if savedImageURLs.isEmpty, workingScanImageCount > 0 {
             savedImageURLs = imageURLsInWorkingScan()
-            savedFrameCount = savedImageURLs.count
+            synchronizeSavedFrameCount()
         }
 
         guard !savedImageURLs.isEmpty else {
@@ -353,6 +353,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             let diagnosticsCSVData = try makeCaptureDiagnosticsCSVData()
             let coverageDiagnosticsJSONData = try makeCoverageDiagnosticsJSONData()
             let coverageDiagnosticsCSVData = try makeCoverageDiagnosticsCSVData()
+            let coverageFrameDiagnosticsCSVData = try makeCoverageFrameDiagnosticsCSVData()
             try await Task.detached(priority: .userInitiated) { [weak self] in
                 try ZipArchiveWriter.write(
                     fileEntries: imageEntries,
@@ -361,7 +362,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                         ZipDataEntry(path: "capture_diagnostics.json", data: diagnosticsJSONData),
                         ZipDataEntry(path: "capture_diagnostics.csv", data: diagnosticsCSVData),
                         ZipDataEntry(path: "coverage_diagnostics.json", data: coverageDiagnosticsJSONData),
-                        ZipDataEntry(path: "coverage_diagnostics.csv", data: coverageDiagnosticsCSVData)
+                        ZipDataEntry(path: "coverage_diagnostics.csv", data: coverageDiagnosticsCSVData),
+                        ZipDataEntry(path: "coverage_frame_diagnostics.csv", data: coverageFrameDiagnosticsCSVData)
                     ],
                     to: archiveURL
                 ) { completed, total in
@@ -593,6 +595,11 @@ final class CameraCaptureController: NSObject, ObservableObject {
             .appendingPathComponent("coverage_diagnostics.json")
     }
 
+    private var workingScanCoverageFrameDiagnosticsCSVURL: URL {
+        workingScanDirectory
+            .appendingPathComponent("coverage_frame_diagnostics.csv")
+    }
+
     private var workingScanStateURL: URL {
         workingScanDirectory
             .appendingPathComponent("scan_state.json")
@@ -624,7 +631,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
         outputDirectory = workingScanImagesDirectory
         savedImageURLs = imageURLsInWorkingScan()
-        savedFrameCount = savedImageURLs.count
+        synchronizeSavedFrameCount()
         frameIndex = savedFrameCount
         lastSavedFramePath = savedImageURLs.last?.path ?? "None"
         previousScanFound = true
@@ -741,6 +748,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 .write(to: workingScanDiagnosticsCSVURL, options: [.atomic])
             try makeCoverageDiagnosticsJSONData()
                 .write(to: workingScanCoverageDiagnosticsURL, options: [.atomic])
+            try makeCoverageFrameDiagnosticsCSVData()
+                .write(to: workingScanCoverageFrameDiagnosticsCSVURL, options: [.atomic])
 
             let state = WorkingScanState(
                 savedImagePaths: savedImageURLs.map(\.path),
@@ -1185,8 +1194,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 )
 
                 await MainActor.run {
-                    self.savedFrameCount += 1
                     self.savedImageURLs.append(url)
+                    self.synchronizeSavedFrameCount()
                     self.workingScanExists = true
                     self.workingScanImageCount = self.savedImageURLs.count
                     self.lastSavedFramePath = url.path
@@ -1246,6 +1255,9 @@ final class CameraCaptureController: NSObject, ObservableObject {
                     )
                     self.updateMissionTelemetry()
                     self.updateCoverageTelemetry(timestamp: capturedAt)
+                    if !self.isScanning, let endedAt = self.scanEndedAt {
+                        self.postScanReport = self.makeCaptureIntelligenceSummary(endedAt: endedAt)
+                    }
                     self.persistWorkingScanMetadata()
                 }
             } catch {
@@ -1327,6 +1339,19 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 isAdjustingFocus: focus.isAdjusting,
                 lensPosition: focus.lensPosition
             )
+        )
+        coverageManager.recordFrameDiagnostic(
+            frameNumber: frameNumber,
+            timestamp: timestamp,
+            // Coverage v1 reads the latest Core Motion yaw when telemetry is
+            // updated. Record that same value so exports audit the value the
+            // Coverage Engine actually used, including any save-write latency.
+            absoluteYawRadians: motionManager.deviceMotion?.attitude.yaw,
+            outcome: outcome,
+            exclusionReason: frameQuality.rejectionReason,
+            viewChangeScore: viewChangeScore,
+            movementClassification: movementEvidenceSnapshot.movementClassification,
+            scanHealth: scanHealth
         )
     }
 
@@ -1623,6 +1648,20 @@ final class CameraCaptureController: NSObject, ObservableObject {
             throw CaptureDiagnosticsError.csvEncodingFailed
         }
         return data
+    }
+
+    private func makeCoverageFrameDiagnosticsCSVData() throws -> Data {
+        guard let data = CoverageFrameDiagnosticsCSVEncoder.encode(
+            coverageManager.diagnostics.perFrame
+        ) else {
+            throw CaptureDiagnosticsError.csvEncodingFailed
+        }
+        return data
+    }
+
+    private func synchronizeSavedFrameCount() {
+        savedFrameCount = SavedFrameCountSynchronizer.count(for: savedImageURLs)
+        workingScanImageCount = savedFrameCount
     }
 
     private func makeTranslationDiagnosticsSummary() -> TranslationDiagnosticsSummary {

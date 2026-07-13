@@ -16,7 +16,7 @@ struct CoverageSectorEvaluator {
     ]
 
     func sector(for relativeYawRadians: Double) -> CoverageSectorID {
-        let degrees = normalizedDegrees(relativeYawRadians * 180.0 / .pi)
+        let degrees = normalizedDegrees(for: relativeYawRadians)
 
         if degrees >= 315 || degrees < 45 {
             return .startWall
@@ -31,6 +31,14 @@ struct CoverageSectorEvaluator {
         }
 
         return .leftSide
+    }
+
+    func normalizedDegrees(for relativeYawRadians: Double) -> Double {
+        normalizedDegrees(relativeYawRadians * 180.0 / .pi)
+    }
+
+    func boundary(for sectorID: CoverageSectorID) -> CoverageSector? {
+        sectors.first { $0.id == sectorID }
     }
 
     private func normalizedDegrees(_ degrees: Double) -> Double {

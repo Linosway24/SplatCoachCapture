@@ -30,7 +30,7 @@ enum MissionStatus: String, Equatable {
     case needsAttention = "Needs Attention"
 }
 
-enum MovementClassification: String, Equatable {
+enum MovementClassification: String, Equatable, Codable {
     case unknown
     case walking
     case rotatingInPlace

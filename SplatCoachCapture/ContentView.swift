@@ -70,14 +70,6 @@ struct ContentView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                if isDeveloperMode, isDebugVisible {
-                    debugOverlay
-                        .padding(.horizontal, 14)
-                        .padding(.top, proxy.safeAreaInsets.top + 74)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-
                 if let exportProgressText = camera.exportProgressText {
                     exportProgressOverlay(exportProgressText)
                         .padding(.top, proxy.safeAreaInsets.top + 76)
@@ -108,6 +100,13 @@ struct ContentView: View {
             if let exportArchiveURL {
                 ShareSheet(activityItems: [exportArchiveURL])
             }
+        }
+        .sheet(isPresented: $isDebugVisible, onDismiss: {
+            isDeveloperMode = false
+        }) {
+            developerDiagnosticsSheet
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .alert(
             "Export Failed",
@@ -222,8 +221,8 @@ struct ContentView: View {
 
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    isDeveloperMode.toggle()
-                    isDebugVisible = isDeveloperMode
+                    isDeveloperMode = true
+                    isDebugVisible = true
                 }
             } label: {
                 Image(systemName: isDeveloperMode ? "ladybug.fill" : "ladybug")
@@ -516,7 +515,7 @@ struct ContentView: View {
 
                 VStack(spacing: 5) {
                     reportRow("Duration", formattedDuration(report.captureDuration))
-                    reportRow("Frames", "\(report.framesSaved) saved / \(report.framesSeen) seen")
+                    reportRow("Frames", "\(camera.savedFrameCount) saved / \(report.framesSeen) seen")
                     reportRow("Blur avg", report.blur.average.map { String(format: "%.1f", $0) } ?? "Unavailable")
                     reportRow("Motion avg", report.motion.average.map { String(format: "%.3f", $0) } ?? "Unavailable")
                     reportRow("Dominant health", "\(report.dominantScanHealth.capitalized) \(String(format: "%.0f%%", report.dominantScanHealthPercent))")
@@ -557,23 +556,32 @@ struct ContentView: View {
         }
     }
 
+    private var developerDiagnosticsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                debugOverlay
+                    .padding(16)
+            }
+            .background(Color.black)
+            .navigationTitle("Developer Diagnostics")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        isDebugVisible = false
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
     private var debugOverlay: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Label("Debug", systemImage: "ladybug")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.orange)
-
-                Spacer()
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isDebugVisible = false
-                    }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.bold))
-                }
             }
 
             debugRow("Frames Seen", "\(camera.framesSeen)")
@@ -617,7 +625,7 @@ struct ContentView: View {
         }
         .font(.system(.caption, design: .monospaced))
         .padding(12)
-        .frame(width: 330, alignment: .leading)
+        .frame(maxWidth: 520, alignment: .leading)
         .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)

@@ -20,6 +20,7 @@ final class CoverageManager: ObservableObject {
     private var lastSavedFrameCount = 0
     private var lastSavedNewAngleCount = 0
     private var samples: [CoverageSample] = []
+    private var frameDiagnostics: [CoverageFrameDiagnostic] = []
     private var lastMovementClassification: MovementClassification = .unknown
 
     func startScan(initialAttitude: CMAttitude?) {
@@ -27,6 +28,7 @@ final class CoverageManager: ObservableObject {
         lastSavedFrameCount = 0
         lastSavedNewAngleCount = 0
         samples = []
+        frameDiagnostics = []
         lastMovementClassification = .unknown
         summary = makeSummary()
     }
@@ -40,6 +42,7 @@ final class CoverageManager: ObservableObject {
         lastSavedFrameCount = 0
         lastSavedNewAngleCount = 0
         samples = []
+        frameDiagnostics = []
         lastMovementClassification = .unknown
         summary = .empty
     }
@@ -131,19 +134,7 @@ final class CoverageManager: ObservableObject {
         stableFrames: Int,
         viewChange: Double
     ) {
-        let movementWeight: Double
-        switch sample.movementClassification {
-        case .walking:
-            movementWeight = 1.0
-        case .smallAreaPacing:
-            movementWeight = 0.45
-        case .unknown:
-            movementWeight = 0.3
-        case .stopped:
-            movementWeight = 0.15
-        case .rotatingInPlace:
-            movementWeight = 0.08
-        }
+        let movementWeight = Self.evidenceWeight(for: sample.movementClassification)
 
         return (
             savedFrames: Int((Double(sample.savedFrameDelta) * movementWeight).rounded()),
@@ -153,12 +144,71 @@ final class CoverageManager: ObservableObject {
         )
     }
 
+    func recordFrameDiagnostic(
+        frameNumber: Int,
+        timestamp: Date,
+        absoluteYawRadians: Double?,
+        outcome: String,
+        exclusionReason: String?,
+        viewChangeScore: Double?,
+        movementClassification: MovementClassification,
+        scanHealth: ScanHealthState
+    ) {
+        let yaw = absoluteYawRadians.flatMap { $0.isFinite ? $0 : nil }
+        let relativeYaw = yaw.flatMap { yaw in
+            startingYawRadians.map { yaw - $0 }
+        }
+        let normalizedYaw = relativeYaw.map(sectorEvaluator.normalizedDegrees(for:))
+        let assignedSector = relativeYaw.map(sectorEvaluator.sector(for:))
+        let boundary = assignedSector.flatMap(sectorEvaluator.boundary(for:))
+        let saved = outcome.hasPrefix("saved-")
+
+        frameDiagnostics.append(
+            CoverageFrameDiagnostic(
+                frameNumber: frameNumber,
+                timestamp: timestamp,
+                absoluteYawRadians: yaw,
+                absoluteYawDegrees: yaw.map { $0 * 180.0 / .pi },
+                startYawRadians: startingYawRadians,
+                startYawDegrees: startingYawRadians.map { $0 * 180.0 / .pi },
+                startRelativeYawRadians: relativeYaw,
+                startRelativeYawDegrees: relativeYaw.map { $0 * 180.0 / .pi },
+                normalizedYawDegrees: normalizedYaw,
+                assignedSector: assignedSector,
+                assignedSectorStartDegrees: boundary?.startDegrees,
+                assignedSectorEndDegrees: boundary?.endDegrees,
+                saved: saved,
+                excluded: !saved,
+                exclusionReason: saved ? nil : exclusionReason ?? outcome,
+                evidenceWeight: Self.evidenceWeight(for: movementClassification),
+                viewChangeScore: viewChangeScore.flatMap { $0.isFinite ? $0 : nil },
+                newAngleDecision: saved && outcome.contains("new-angle"),
+                overlapDecision: saved && outcome.contains("overlap"),
+                movementClassification: movementClassification,
+                scanHealth: scanHealth.rawValue
+            )
+        )
+    }
+
+    static func evidenceWeight(for movementClassification: MovementClassification) -> Double {
+        switch movementClassification {
+        case .walking: 1.0
+        case .smallAreaPacing: 0.45
+        case .unknown: 0.3
+        case .stopped: 0.15
+        case .rotatingInPlace: 0.08
+        }
+    }
+
     var diagnostics: CoverageDiagnostics {
         CoverageDiagnostics(
             methodology: CoverageTuning.methodology,
             assumptions: CoverageTuning.assumptions,
             thresholds: .current,
-            summary: summary
+            sectorBoundaries: sectorEvaluator.sectors,
+            controlledTestProcedure: CoverageTuning.controlledTestProcedure,
+            summary: summary,
+            perFrame: frameDiagnostics
         )
     }
 }
