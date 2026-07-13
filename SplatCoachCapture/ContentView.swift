@@ -12,6 +12,7 @@ struct ContentView: View {
     @StateObject private var camera = CameraCaptureController()
     @State private var exportArchiveURL: URL?
     @State private var isShowingShareSheet = false
+    @State private var isDeveloperMode = false
     @State private var isDebugVisible = false
     @State private var isShowingResetConfirmation = false
     @State private var isShowingPreviousScanPrompt = false
@@ -40,7 +41,9 @@ struct ContentView: View {
 
                     Spacer(minLength: 0)
 
-                    centerFeedback
+                    if isDeveloperMode || !camera.isScanning {
+                        centerFeedback
+                    }
 
                     Spacer(minLength: 0)
 
@@ -51,9 +54,15 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
                 if camera.isScanning {
-                    VStack(alignment: .leading, spacing: 10) {
-                        MissionView(manager: camera.missionManager)
-                        CoverageView(manager: camera.coverageManager)
+                    Group {
+                        if isDeveloperMode {
+                            VStack(alignment: .leading, spacing: 10) {
+                                MissionView(manager: camera.missionManager)
+                                CoverageView(manager: camera.coverageManager)
+                            }
+                        } else {
+                            compactCaptureOverlay
+                        }
                     }
                         .padding(.horizontal, 14)
                         .padding(.top, proxy.safeAreaInsets.top + 74)
@@ -61,7 +70,7 @@ struct ContentView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                if isDebugVisible {
+                if isDeveloperMode, isDebugVisible {
                     debugOverlay
                         .padding(.horizontal, 14)
                         .padding(.top, proxy.safeAreaInsets.top + 74)
@@ -205,21 +214,96 @@ struct ContentView: View {
 
             Spacer()
 
-            confidencePill
+            if isDeveloperMode {
+                confidencePill
+            }
 
             statusPill
 
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    isDebugVisible.toggle()
+                    isDeveloperMode.toggle()
+                    isDebugVisible = isDeveloperMode
                 }
             } label: {
-                Image(systemName: "ladybug")
+                Image(systemName: isDeveloperMode ? "ladybug.fill" : "ladybug")
                     .font(.body.weight(.bold))
                     .frame(width: 42, height: 42)
-                    .background(.black.opacity(0.48), in: Circle())
+                    .background(
+                        isDeveloperMode ? Color.orange.opacity(0.82) : Color.black.opacity(0.48),
+                        in: Circle()
+                    )
             }
-            .accessibilityLabel("Toggle debug overlay")
+            .accessibilityLabel("Developer Mode")
+            .accessibilityValue(isDeveloperMode ? "On" : "Off")
+            .accessibilityHint("Shows detailed mission, coverage, and camera diagnostics")
+        }
+    }
+
+    private var compactCaptureOverlay: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(camera.missionManager.activeMission.title)
+                    .font(.caption.weight(.black))
+                    .textCase(.uppercase)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Text("\(camera.savedFrameCount) saved")
+                    .font(.caption.monospacedDigit().weight(.bold))
+                    .foregroundStyle(.white.opacity(0.78))
+            }
+
+            Label(compactCoachingInstruction, systemImage: "figure.walk")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+
+            Label(
+                camera.coverageManager.summary.recommendation.text,
+                systemImage: "square.grid.2x2"
+            )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(compactCoverageColor)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(.black.opacity(0.46), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.28), radius: 8, y: 3)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(camera.missionManager.activeMission.title). " +
+            "\(camera.savedFrameCount) frames saved. " +
+            "\(compactCoachingInstruction). " +
+            "Coverage: \(camera.coverageManager.summary.recommendation.text)"
+        )
+    }
+
+    private var compactCoachingInstruction: String {
+        switch camera.currentScanHealth {
+        case .coach, .hold, .lost:
+            return camera.liveCoachingText
+        case .ready, .capturing:
+            return camera.missionManager.progress.instruction
+        }
+    }
+
+    private var compactCoverageColor: Color {
+        switch camera.coverageManager.summary.recommendation.priority {
+        case .complete:
+            return .green
+        case .important:
+            return .orange
+        case .normal:
+            return .yellow
         }
     }
 
@@ -317,7 +401,10 @@ struct ContentView: View {
         VStack(spacing: 12) {
             postScanReportPanel
 
-            Group {
+            if camera.isScanning, !isDeveloperMode {
+                compactStopButton
+                    .frame(maxWidth: 220)
+            } else {
                 if isLandscape {
                     HStack(spacing: 12) {
                         controlButtons
@@ -332,6 +419,17 @@ struct ContentView: View {
         }
         .controlSize(.large)
         .tint(.orange)
+    }
+
+    private var compactStopButton: some View {
+        Button {
+            camera.stopScan()
+        } label: {
+            Label("Stop Scan", systemImage: "stop.circle.fill")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(OverlayButtonStyle(isProminent: false))
+        .accessibilityHint("Ends the active scan and shows the scan report")
     }
 
     private var controlButtons: some View {
