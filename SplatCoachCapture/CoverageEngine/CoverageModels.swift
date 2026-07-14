@@ -121,6 +121,35 @@ struct CoverageCoachingChange: Equatable, Codable {
     let recommendationKey: String
     let reason: String
     let timestamp: Date
+    let state: CoverageCoachingStateDiagnostic?
+}
+
+struct CoverageCoachingStateDiagnostic: Equatable, Codable {
+    static let empty = CoverageCoachingStateDiagnostic(
+        rawActiveSector: nil,
+        targetSector: nil,
+        debouncedInTarget: false,
+        targetEntryStartedAt: nil,
+        targetEntryElapsed: 0,
+        targetExitStartedAt: nil,
+        targetExitElapsed: 0,
+        targetEvidenceDelta: 0,
+        progressImproving: false,
+        progressStalled: false,
+        guidanceDecisionReason: "not-started"
+    )
+
+    let rawActiveSector: CoverageSectorID?
+    let targetSector: CoverageSectorID?
+    let debouncedInTarget: Bool
+    let targetEntryStartedAt: Date?
+    let targetEntryElapsed: TimeInterval
+    let targetExitStartedAt: Date?
+    let targetExitElapsed: TimeInterval
+    let targetEvidenceDelta: Double
+    let progressImproving: Bool
+    let progressStalled: Bool
+    let guidanceDecisionReason: String
 }
 
 struct CoverageSummary: Equatable, Codable {
@@ -174,6 +203,12 @@ enum CoverageTuning {
     static let coachingStartupMinimumSectorsWithEvidence = 3
     static let coachingSmallDeficitMinimumProgress = 0.75
     static let coachingCompletionAcknowledgementDuration: TimeInterval = 2
+    static let coachingTargetEntryDwellDuration: TimeInterval = 1
+    static let coachingTargetExitDwellDuration: TimeInterval = 1.5
+    static let coachingProgressWindowDuration: TimeInterval = 4
+    static let coachingMeaningfulProgressDelta = 0.05
+    static let coachingProgressAcknowledgementDuration: TimeInterval = 2
+    static let coachingProgressStallDuration: TimeInterval = 4
 
     static let methodology = "relative-yaw-four-sector-v1"
     static let controlledTestProcedure = [
@@ -206,6 +241,7 @@ struct CoverageDiagnostics: Codable, Equatable {
     let controlledTestProcedure: [String]
     let coachingThresholds: CoverageCoachingThresholds
     let summary: CoverageSummary
+    let coachingState: CoverageCoachingStateDiagnostic
     let coachingChanges: [CoverageCoachingChange]
     let perFrame: [CoverageFrameDiagnostic]
 }
@@ -216,13 +252,25 @@ struct CoverageCoachingThresholds: Codable, Equatable {
     let startupMinimumSectorsWithEvidence: Int
     let smallDeficitMinimumProgress: Double
     let completionAcknowledgementDuration: TimeInterval
+    let targetEntryDwellDuration: TimeInterval
+    let targetExitDwellDuration: TimeInterval
+    let progressWindowDuration: TimeInterval
+    let meaningfulProgressDelta: Double
+    let progressAcknowledgementDuration: TimeInterval
+    let progressStallDuration: TimeInterval
 
     static let current = CoverageCoachingThresholds(
         startupMinimumDuration: CoverageTuning.coachingStartupMinimumDuration,
         startupMinimumSavedFrames: CoverageTuning.coachingStartupMinimumSavedFrames,
         startupMinimumSectorsWithEvidence: CoverageTuning.coachingStartupMinimumSectorsWithEvidence,
         smallDeficitMinimumProgress: CoverageTuning.coachingSmallDeficitMinimumProgress,
-        completionAcknowledgementDuration: CoverageTuning.coachingCompletionAcknowledgementDuration
+        completionAcknowledgementDuration: CoverageTuning.coachingCompletionAcknowledgementDuration,
+        targetEntryDwellDuration: CoverageTuning.coachingTargetEntryDwellDuration,
+        targetExitDwellDuration: CoverageTuning.coachingTargetExitDwellDuration,
+        progressWindowDuration: CoverageTuning.coachingProgressWindowDuration,
+        meaningfulProgressDelta: CoverageTuning.coachingMeaningfulProgressDelta,
+        progressAcknowledgementDuration: CoverageTuning.coachingProgressAcknowledgementDuration,
+        progressStallDuration: CoverageTuning.coachingProgressStallDuration
     )
 }
 

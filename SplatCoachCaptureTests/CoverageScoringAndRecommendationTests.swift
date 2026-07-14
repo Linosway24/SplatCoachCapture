@@ -101,15 +101,207 @@ final class CoverageScoringAndRecommendationTests: XCTestCase {
             movementClassification: .walking,
             context: context(elapsed: 9, saved: 30, currentSector: .startWall)
         )
+        _ = engine.recommendation(
+            for: evidence,
+            movementClassification: .walking,
+            context: context(elapsed: 9.4, saved: 30, currentSector: .leftSide)
+        )
         let active = engine.recommendation(
             for: evidence,
             movementClassification: .walking,
-            context: context(elapsed: 9.4, saved: 31, currentSector: .leftSide)
+            context: context(elapsed: 10.5, saved: 31, currentSector: .leftSide)
         )
 
         XCTAssertEqual(active.text, "Good—keep covering the left side.")
         XCTAssertEqual(active.targetSector, .leftSide)
-        XCTAssertEqual(active.changeReason, "entered-target-sector")
+        XCTAssertEqual(active.changeReason, "target-entry-debounced")
+    }
+
+    func testTargetEntryRequiresContinuousDwell() {
+        let engine = CoverageRecommendationEngine()
+        let leftGap = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3, angles: 1, stable: 2)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9, saved: 30, currentSector: .startWall)
+        )
+        let pending = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9.2, saved: 30, currentSector: .leftSide)
+        )
+        let stillPending = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.1, saved: 30, currentSector: .leftSide)
+        )
+        let entered = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.2, saved: 30, currentSector: .leftSide)
+        )
+
+        XCTAssertEqual(pending.text, "Continue along the left side.")
+        XCTAssertEqual(stillPending.text, "Continue along the left side.")
+        XCTAssertEqual(entered.text, "Good—keep covering the left side.")
+        XCTAssertTrue(engine.diagnosticState.debouncedInTarget)
+    }
+
+    func testBriefBoundaryCrossingsDoNotOscillateCoaching() {
+        let engine = CoverageRecommendationEngine()
+        let leftGap = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3, angles: 1, stable: 2)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9, saved: 30, currentSector: .startWall)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9.1, saved: 30, currentSector: .leftSide)
+        )
+        let active = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.1, saved: 30, currentSector: .leftSide)
+        )
+        let boundaryCrossing = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.3, saved: 30, currentSector: .oppositeWall)
+        )
+        let returned = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.8, saved: 30, currentSector: .leftSide)
+        )
+
+        XCTAssertEqual(active.key, "correcting.leftSide.active")
+        XCTAssertEqual(boundaryCrossing.key, "correcting.leftSide.active")
+        XCTAssertEqual(returned.key, "correcting.leftSide.active")
+        XCTAssertEqual(engine.changeHistory.filter { $0.reason == "target-exit-debounced" }.count, 0)
+    }
+
+    func testTargetExitRequiresContinuousDwell() {
+        let engine = CoverageRecommendationEngine()
+        let leftGap = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3, angles: 1, stable: 2)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9, saved: 30, currentSector: .startWall)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9.1, saved: 30, currentSector: .leftSide)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.1, saved: 30, currentSector: .leftSide)
+        )
+        let pendingExit = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.2, saved: 30, currentSector: .oppositeWall)
+        )
+        let stillInside = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 11.6, saved: 30, currentSector: .oppositeWall)
+        )
+        let exited = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 11.7, saved: 30, currentSector: .oppositeWall)
+        )
+
+        XCTAssertEqual(pendingExit.key, "correcting.leftSide.active")
+        XCTAssertEqual(stillInside.key, "correcting.leftSide.active")
+        XCTAssertEqual(exited.text, "Continue along the left side.")
+        XCTAssertEqual(exited.changeReason, "target-exit-debounced")
+        XCTAssertFalse(engine.diagnosticState.debouncedInTarget)
+    }
+
+    func testImprovingEvidenceSuppressesRepeatedDirectionalGuidance() {
+        let engine = CoverageRecommendationEngine()
+        let initial = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3, angles: 1, stable: 2)
+        )
+        let improved = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3.5, angles: 1.2, stable: 2.5)
+        )
+        _ = engine.recommendation(
+            for: initial,
+            movementClassification: .walking,
+            context: context(elapsed: 9, saved: 30, currentSector: .startWall)
+        )
+        _ = engine.recommendation(
+            for: initial,
+            movementClassification: .walking,
+            context: context(elapsed: 9.1, saved: 30, currentSector: .leftSide)
+        )
+        let improving = engine.recommendation(
+            for: improved,
+            movementClassification: .walking,
+            context: context(elapsed: 10.1, saved: 31, currentSector: .leftSide)
+        )
+        let boundaryJitter = engine.recommendation(
+            for: improved,
+            movementClassification: .walking,
+            context: context(elapsed: 10.4, saved: 31, currentSector: .oppositeWall)
+        )
+        let quiet = engine.recommendation(
+            for: improved,
+            movementClassification: .walking,
+            context: context(elapsed: 12.2, saved: 31, currentSector: .leftSide)
+        )
+
+        XCTAssertEqual(improving.text, "Good—left-side coverage is improving.")
+        XCTAssertEqual(boundaryJitter.text, "Good—left-side coverage is improving.")
+        XCTAssertEqual(quiet.text, "Keep moving to new viewpoints.")
+        XCTAssertTrue(engine.diagnosticState.progressImproving)
+        XCTAssertGreaterThanOrEqual(engine.diagnosticState.targetEvidenceDelta, 0.05)
+    }
+
+    func testStalledEvidenceRestoresDirectionalGuidance() {
+        let engine = CoverageRecommendationEngine()
+        let leftGap = sectors(
+            left: evidence(.leftSide, level: .sparse, saved: 3, angles: 1, stable: 2)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9, saved: 30, currentSector: .startWall)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 9.1, saved: 30, currentSector: .leftSide)
+        )
+        _ = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 10.1, saved: 30, currentSector: .leftSide)
+        )
+        let stalled = engine.recommendation(
+            for: leftGap,
+            movementClassification: .walking,
+            context: context(elapsed: 13.1, saved: 30, currentSector: .leftSide)
+        )
+
+        XCTAssertEqual(stalled.text, "Continue along the left side.")
+        XCTAssertTrue(engine.diagnosticState.progressStalled)
+        XCTAssertEqual(
+            engine.diagnosticState.guidanceDecisionReason,
+            "directional-guidance-repeated-target-evidence-stalled"
+        )
     }
 
     func testSatisfyingTargetShowsImprovementAcknowledgement() {

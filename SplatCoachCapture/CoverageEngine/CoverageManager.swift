@@ -275,6 +275,7 @@ final class CoverageManager: ObservableObject {
             controlledTestProcedure: CoverageTuning.controlledTestProcedure,
             coachingThresholds: .current,
             summary: summary,
+            coachingState: recommendationEngine.diagnosticState,
             coachingChanges: recommendationEngine.changeHistory,
             perFrame: frameDiagnostics
         )
