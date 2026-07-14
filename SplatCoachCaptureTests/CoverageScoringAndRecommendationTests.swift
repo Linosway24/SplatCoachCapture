@@ -47,8 +47,8 @@ final class CoverageScoringAndRecommendationTests: XCTestCase {
     private func evidence(
         _ sector: CoverageSectorID,
         level: CoverageEvidenceLevel,
-        saved: Int,
-        angles: Int
+        saved: Double,
+        angles: Double
     ) -> CoverageEvidence {
         CoverageEvidence(
             sectorID: sector,

@@ -10,10 +10,10 @@ final class CoverageDiagnosticsTests: XCTestCase {
 
         let directions: [(Double, CoverageSectorID)] = [
             (0, .startWall),
-            (.pi / 2, .rightSide),
+            (-.pi / 2, .rightSide),
             (.pi, .oppositeWall),
-            (3 * .pi / 2, .leftSide),
-            (2 * .pi, .startWall)
+            (.pi / 2, .leftSide),
+            (-2 * .pi, .startWall)
         ]
 
         for (index, direction) in directions.enumerated() {
@@ -25,6 +25,9 @@ final class CoverageDiagnosticsTests: XCTestCase {
                 exclusionReason: nil,
                 viewChangeScore: 1.5,
                 movementClassification: .walking,
+                recentLinearMotionImpulse: 1.1,
+                recentRotationImpulse: 0.2,
+                rotationDominance: 0.15,
                 scanHealth: .capturing
             )
         }
@@ -47,7 +50,7 @@ final class CoverageDiagnosticsTests: XCTestCase {
         manager.recordFrameDiagnostic(
             frameNumber: 12,
             timestamp: Date(),
-            absoluteYawRadians: .pi / 2,
+            absoluteYawRadians: -.pi / 2,
             outcome: "rejected-too-blurry",
             exclusionReason: "Too blurry",
             viewChangeScore: nil,
@@ -58,7 +61,7 @@ final class CoverageDiagnosticsTests: XCTestCase {
         let frame = manager.diagnostics.perFrame.first
         XCTAssertEqual(frame?.assignedSector, .rightSide)
         XCTAssertEqual(frame?.exclusionReason, "Too blurry")
-        XCTAssertEqual(frame?.evidenceWeight, 0.08)
+        XCTAssertEqual(frame?.evidenceWeight, 0.25)
         XCTAssertEqual(frame?.saved, false)
         XCTAssertEqual(frame?.excluded, true)
         XCTAssertEqual(frame?.newAngleDecision, false)
@@ -68,7 +71,19 @@ final class CoverageDiagnosticsTests: XCTestCase {
     func testCoverageDiagnosticsEncodeAuditableJSONAndCSVFields() throws {
         let manager = CoverageManager()
         manager.startScan(initialAttitude: nil)
-        manager.update(with: telemetry(yaw: 0, saved: 0))
+        manager.update(with: CoverageTelemetry(
+            timestamp: Date(),
+            isScanning: true,
+            yawRadians: 0,
+            savedFrameCount: 1,
+            savedNewAngleCount: 1,
+            currentScanHealth: .capturing,
+            movementClassification: .rotatingInPlace,
+            recentLinearMotionImpulse: 0.1,
+            recentRotationImpulse: 2.0,
+            rotationDominance: 0.9,
+            viewChangeScore: 1.5
+        ))
         manager.recordFrameDiagnostic(
             frameNumber: 42,
             timestamp: Date(timeIntervalSince1970: 42),
@@ -77,6 +92,9 @@ final class CoverageDiagnosticsTests: XCTestCase {
             exclusionReason: nil,
             viewChangeScore: 0.75,
             movementClassification: .walking,
+            recentLinearMotionImpulse: 1.1,
+            recentRotationImpulse: 0.2,
+            rotationDominance: 0.15,
             scanHealth: .capturing
         )
 
@@ -88,6 +106,7 @@ final class CoverageDiagnosticsTests: XCTestCase {
         XCTAssertTrue(json.contains("\"sectorBoundaries\""))
         XCTAssertTrue(json.contains("\"controlledTestProcedure\""))
         XCTAssertTrue(json.contains("\"perFrame\""))
+        XCTAssertTrue(json.contains("\"savedFrames\":0.25"))
 
         let csvData = try XCTUnwrap(
             CoverageFrameDiagnosticsCSVEncoder.encode(manager.diagnostics.perFrame)
@@ -107,6 +126,9 @@ final class CoverageDiagnosticsTests: XCTestCase {
             savedNewAngleCount: 0,
             currentScanHealth: .capturing,
             movementClassification: .walking,
+            recentLinearMotionImpulse: 1.1,
+            recentRotationImpulse: 0.2,
+            rotationDominance: 0.15,
             viewChangeScore: 0
         )
     }

@@ -68,6 +68,12 @@ final class CoverageManager: ObservableObject {
             return
         }
 
+        let motionState = Self.motionState(
+            classification: telemetry.movementClassification,
+            recentLinearMotionImpulse: telemetry.recentLinearMotionImpulse,
+            recentRotationImpulse: telemetry.recentRotationImpulse,
+            rotationDominance: telemetry.rotationDominance
+        )
         let sample = CoverageSample(
             timestamp: telemetry.timestamp,
             sectorID: sectorEvaluator.sector(for: yaw - origin),
@@ -75,6 +81,7 @@ final class CoverageManager: ObservableObject {
             newAngleDelta: newAngleDelta,
             isStable: telemetry.currentScanHealth == .capturing || telemetry.currentScanHealth == .coach,
             movementClassification: telemetry.movementClassification,
+            evidenceWeight: Self.evidenceWeight(for: motionState),
             viewChangeScore: telemetry.viewChangeScore.isFinite ? telemetry.viewChangeScore : 0
         )
 
@@ -98,10 +105,10 @@ final class CoverageManager: ObservableObject {
     private func evidence(for sectorID: CoverageSectorID) -> CoverageEvidence {
         let sectorSamples = samples.filter { $0.sectorID == sectorID }
         let weightedSamples = sectorSamples.map(weightedSample)
-        let savedFrames = weightedSamples.reduce(0) { $0 + $1.savedFrames }
-        let newAngleFrames = weightedSamples.reduce(0) { $0 + $1.newAngleFrames }
-        let stableFrames = weightedSamples.reduce(0) { $0 + $1.stableFrames }
-        let viewChangeTotal = weightedSamples.reduce(0) { $0 + $1.viewChange }
+        let savedFrames = weightedSamples.reduce(0.0) { $0 + $1.savedFrames }
+        let newAngleFrames = weightedSamples.reduce(0.0) { $0 + $1.newAngleFrames }
+        let stableFrames = weightedSamples.reduce(0.0) { $0 + $1.stableFrames }
+        let viewChangeTotal = weightedSamples.reduce(0.0) { $0 + $1.viewChange }
         let level = scoringEngine.level(
             savedFrames: savedFrames,
             newAngleFrames: newAngleFrames,
@@ -129,18 +136,16 @@ final class CoverageManager: ObservableObject {
     }
 
     private func weightedSample(_ sample: CoverageSample) -> (
-        savedFrames: Int,
-        newAngleFrames: Int,
-        stableFrames: Int,
+        savedFrames: Double,
+        newAngleFrames: Double,
+        stableFrames: Double,
         viewChange: Double
     ) {
-        let movementWeight = Self.evidenceWeight(for: sample.movementClassification)
-
         return (
-            savedFrames: Int((Double(sample.savedFrameDelta) * movementWeight).rounded()),
-            newAngleFrames: Int((Double(sample.newAngleDelta) * movementWeight).rounded()),
-            stableFrames: sample.isStable ? Int((Double(sample.savedFrameDelta) * movementWeight).rounded()) : 0,
-            viewChange: sample.viewChangeScore * movementWeight
+            savedFrames: Double(sample.savedFrameDelta) * sample.evidenceWeight,
+            newAngleFrames: Double(sample.newAngleDelta) * sample.evidenceWeight,
+            stableFrames: sample.isStable ? Double(sample.savedFrameDelta) * sample.evidenceWeight : 0,
+            viewChange: sample.viewChangeScore * sample.evidenceWeight
         )
     }
 
@@ -152,6 +157,9 @@ final class CoverageManager: ObservableObject {
         exclusionReason: String?,
         viewChangeScore: Double?,
         movementClassification: MovementClassification,
+        recentLinearMotionImpulse: Double = 0,
+        recentRotationImpulse: Double = 0,
+        rotationDominance: Double = 0,
         scanHealth: ScanHealthState
     ) {
         let yaw = absoluteYawRadians.flatMap { $0.isFinite ? $0 : nil }
@@ -162,6 +170,13 @@ final class CoverageManager: ObservableObject {
         let assignedSector = relativeYaw.map(sectorEvaluator.sector(for:))
         let boundary = assignedSector.flatMap(sectorEvaluator.boundary(for:))
         let saved = outcome.hasPrefix("saved-")
+
+        let motionState = Self.motionState(
+            classification: movementClassification,
+            recentLinearMotionImpulse: recentLinearMotionImpulse,
+            recentRotationImpulse: recentRotationImpulse,
+            rotationDominance: rotationDominance
+        )
 
         frameDiagnostics.append(
             CoverageFrameDiagnostic(
@@ -180,7 +195,7 @@ final class CoverageManager: ObservableObject {
                 saved: saved,
                 excluded: !saved,
                 exclusionReason: saved ? nil : exclusionReason ?? outcome,
-                evidenceWeight: Self.evidenceWeight(for: movementClassification),
+                evidenceWeight: Self.evidenceWeight(for: motionState),
                 viewChangeScore: viewChangeScore.flatMap { $0.isFinite ? $0 : nil },
                 newAngleDecision: saved && outcome.contains("new-angle"),
                 overlapDecision: saved && outcome.contains("overlap"),
@@ -190,13 +205,48 @@ final class CoverageManager: ObservableObject {
         )
     }
 
-    static func evidenceWeight(for movementClassification: MovementClassification) -> Double {
-        switch movementClassification {
-        case .walking: 1.0
-        case .smallAreaPacing: 0.45
-        case .unknown: 0.3
-        case .stopped: 0.15
-        case .rotatingInPlace: 0.08
+    static func motionState(
+        classification: MovementClassification,
+        recentLinearMotionImpulse: Double,
+        recentRotationImpulse: Double,
+        rotationDominance: Double
+    ) -> CoverageMotionState {
+        if classification == .rotatingInPlace {
+            return .rotatingInPlace
+        }
+        if classification == .stopped {
+            return .stationaryHold
+        }
+
+        let rotationDominant = recentRotationImpulse >= 0.8 && rotationDominance >= 0.62
+        if rotationDominant {
+            return .rotatingInPlace
+        }
+
+        if classification == .walking {
+            // The mission classifier can call weak accelerometer pulses walking.
+            // Coverage requires its stronger sustained-linear threshold before
+            // awarding full perimeter evidence.
+            if recentLinearMotionImpulse >= 0.7 {
+                return .walkingTranslation
+            }
+            return recentRotationImpulse < 0.45 ? .stationaryHold : .uncertain
+        }
+
+        let nearlyStationary = recentLinearMotionImpulse < 0.18 && recentRotationImpulse < 0.45
+        if nearlyStationary {
+            return .stationaryHold
+        }
+
+        return .uncertain
+    }
+
+    static func evidenceWeight(for motionState: CoverageMotionState) -> Double {
+        switch motionState {
+        case .walkingTranslation: 1.0
+        case .uncertain: 0.45
+        case .rotatingInPlace: 0.25
+        case .stationaryHold: 0.1
         }
     }
 

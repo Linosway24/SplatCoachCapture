@@ -9,20 +9,20 @@ import Foundation
 
 struct CoverageScoringEngine {
     func level(
-        savedFrames: Int,
-        newAngleFrames: Int,
-        stableFrames: Int,
+        savedFrames: Double,
+        newAngleFrames: Double,
+        stableFrames: Double,
         viewChangeTotal: Double
     ) -> CoverageEvidenceLevel {
-        if savedFrames >= CoverageTuning.strongSavedFrames,
-           newAngleFrames >= CoverageTuning.strongNewAngleFrames,
-           stableFrames >= CoverageTuning.strongStableFrames {
+        if savedFrames >= Double(CoverageTuning.strongSavedFrames),
+           newAngleFrames >= Double(CoverageTuning.strongNewAngleFrames),
+           stableFrames >= Double(CoverageTuning.strongStableFrames) {
             return .strong
         }
 
-        if savedFrames >= CoverageTuning.adequateSavedFrames,
-           newAngleFrames >= CoverageTuning.adequateNewAngleFrames,
-           stableFrames >= CoverageTuning.adequateStableFrames {
+        if savedFrames >= Double(CoverageTuning.adequateSavedFrames),
+           newAngleFrames >= Double(CoverageTuning.adequateNewAngleFrames),
+           stableFrames >= Double(CoverageTuning.adequateStableFrames) {
             return .adequate
         }
 
@@ -35,20 +35,28 @@ struct CoverageScoringEngine {
 
     func rationale(
         level: CoverageEvidenceLevel,
-        savedFrames: Int,
-        newAngleFrames: Int,
-        stableFrames: Int,
+        savedFrames: Double,
+        newAngleFrames: Double,
+        stableFrames: Double,
         viewChangeTotal: Double
     ) -> String {
+        let saved = display(savedFrames)
+        let angles = display(newAngleFrames)
+        let stable = display(stableFrames)
+
         switch level {
         case .none:
             return "No saved-frame evidence yet."
         case .sparse:
-            return "Sparse: \(savedFrames) weighted saved, \(newAngleFrames) new-angle, \(stableFrames) stable; add views while walking."
+            return "Sparse: \(saved) weighted saved, \(angles) new-angle, \(stable) stable; add views while walking."
         case .adequate:
-            return "Adequate: \(savedFrames) weighted saved, \(newAngleFrames) new-angle, \(stableFrames) stable."
+            return "Adequate: \(saved) weighted saved, \(angles) new-angle, \(stable) stable."
         case .strong:
-            return "Strong: \(savedFrames) weighted saved, \(newAngleFrames) new-angle, \(stableFrames) stable."
+            return "Strong: \(saved) weighted saved, \(angles) new-angle, \(stable) stable."
         }
+    }
+
+    private func display(_ value: Double) -> String {
+        String(format: "%.1f", value)
     }
 }

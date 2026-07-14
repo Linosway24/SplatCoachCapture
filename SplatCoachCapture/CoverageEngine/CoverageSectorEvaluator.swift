@@ -34,7 +34,11 @@ struct CoverageSectorEvaluator {
     }
 
     func normalizedDegrees(for relativeYawRadians: Double) -> Double {
-        normalizedDegrees(relativeYawRadians * 180.0 / .pi)
+        // Core Motion device-attitude yaw decreases during a physical right turn
+        // and increases during a physical left turn. Coverage uses a physical-turn
+        // convention instead: right is positive clockwise, left is negative.
+        // Negate the raw relative yaw exactly once at this boundary.
+        normalizedDegrees(-relativeYawRadians * 180.0 / .pi)
     }
 
     func boundary(for sectorID: CoverageSectorID) -> CoverageSector? {

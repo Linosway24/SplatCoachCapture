@@ -25,6 +25,27 @@ enum CaptureTuning {
     static let jpegQuality = 0.9
 }
 
+enum FrameNoveltyDecision: Equatable {
+    case overlap
+    case newAngleRotation
+    case newAngleViewChange
+
+    static func evaluate(
+        isFirstSave: Bool,
+        rotationDelta: Double,
+        viewChangeScore: Double
+    ) -> FrameNoveltyDecision {
+        guard !isFirstSave else { return .overlap }
+        if rotationDelta >= CaptureTuning.minimumRotationChangeRadians {
+            return .newAngleRotation
+        }
+        if viewChangeScore.isInfinite || viewChangeScore >= CaptureTuning.minimumOverlapViewChangeScore {
+            return .newAngleViewChange
+        }
+        return .overlap
+    }
+}
+
 @MainActor
 final class CameraCaptureController: NSObject, ObservableObject {
     @Published private(set) var statusText = "Ready"
@@ -978,9 +999,6 @@ final class CameraCaptureController: NSObject, ObservableObject {
         lastViewChangeScore = viewChangeScore.isFinite ? viewChangeScore : 0
 
         let isFirstSave = lastSavedSignature == nil
-        let rotatedEnough = poseChange.rotation >= CaptureTuning.minimumRotationChangeRadians
-        let viewChangedEnough = viewChangeScore.isInfinite ||
-            viewChangeScore >= CaptureTuning.minimumOverlapViewChangeScore
         let assessment = makeScanHealthAssessment(
             blurScore: blurScore,
             motion: motion,
@@ -1023,8 +1041,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
 
         let reason = saveReason(
             isFirstSave: isFirstSave,
-            rotatedEnough: rotatedEnough,
-            viewChangedEnough: viewChangedEnough
+            rotationDelta: poseChange.rotation,
+            viewChangeScore: viewChangeScore
         )
 
         updateLiveIntelligence(
@@ -1074,14 +1092,22 @@ final class CameraCaptureController: NSObject, ObservableObject {
         )
     }
 
-    private func saveReason(isFirstSave: Bool, rotatedEnough: Bool, viewChangedEnough: Bool) -> String {
-        if !isFirstSave && (rotatedEnough || viewChangedEnough) {
+    private func saveReason(isFirstSave: Bool, rotationDelta: Double, viewChangeScore: Double) -> String {
+        switch FrameNoveltyDecision.evaluate(
+            isFirstSave: isFirstSave,
+            rotationDelta: rotationDelta,
+            viewChangeScore: viewChangeScore
+        ) {
+        case .newAngleRotation:
             savedNewAngleCount += 1
-            return rotatedEnough ? "Saved new angle - rotation" : "Saved new angle - view change"
+            return "Saved new angle - rotation"
+        case .newAngleViewChange:
+            savedNewAngleCount += 1
+            return "Saved new angle - view change"
+        case .overlap:
+            savedForOverlapCount += 1
+            return isFirstSave ? "Saved overlap - first frame" : "Saved overlap"
         }
-
-        savedForOverlapCount += 1
-        return isFirstSave ? "Saved overlap - first frame" : "Saved overlap"
     }
 
     private func rejectFrame(
@@ -1351,6 +1377,9 @@ final class CameraCaptureController: NSObject, ObservableObject {
             exclusionReason: frameQuality.rejectionReason,
             viewChangeScore: viewChangeScore,
             movementClassification: movementEvidenceSnapshot.movementClassification,
+            recentLinearMotionImpulse: movementEvidenceSnapshot.recentLinearMotionImpulse,
+            recentRotationImpulse: movementEvidenceSnapshot.recentRotationImpulse,
+            rotationDominance: movementEvidenceSnapshot.rotationDominance,
             scanHealth: scanHealth
         )
     }
@@ -1451,6 +1480,9 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 savedNewAngleCount: savedNewAngleCount,
                 currentScanHealth: currentScanHealth,
                 movementClassification: movementEvidenceSnapshot.movementClassification,
+                recentLinearMotionImpulse: movementEvidenceSnapshot.recentLinearMotionImpulse,
+                recentRotationImpulse: movementEvidenceSnapshot.recentRotationImpulse,
+                rotationDominance: movementEvidenceSnapshot.rotationDominance,
                 viewChangeScore: lastViewChangeScore
             )
         )

@@ -83,7 +83,11 @@ struct CoverageView: View {
     }
 
     private func detailText(for sector: CoverageEvidence) -> String {
-        "\(sector.level.title) · S\(sector.savedFrames) A\(sector.newAngleFrames)"
+        "\(sector.level.title) · S\(display(sector.savedFrames)) A\(display(sector.newAngleFrames))"
+    }
+
+    private func display(_ value: Double) -> String {
+        String(format: "%.1f", value)
     }
 
     private var recommendationColor: Color {

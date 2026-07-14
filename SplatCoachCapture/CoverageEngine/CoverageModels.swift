@@ -78,9 +78,9 @@ struct CoverageSector: Identifiable, Equatable, Codable {
 struct CoverageEvidence: Identifiable, Equatable, Codable {
     let sectorID: CoverageSectorID
     let title: String
-    let savedFrames: Int
-    let newAngleFrames: Int
-    let stableFrames: Int
+    let savedFrames: Double
+    let newAngleFrames: Double
+    let stableFrames: Double
     let viewChangeTotal: Double
     let lastUpdatedAt: Date?
     let level: CoverageEvidenceLevel
@@ -148,6 +148,13 @@ enum CoverageTuning {
     ]
 }
 
+enum CoverageMotionState: Equatable {
+    case walkingTranslation
+    case rotatingInPlace
+    case stationaryHold
+    case uncertain
+}
+
 struct CoverageDiagnostics: Codable, Equatable {
     let methodology: String
     let assumptions: [String]
@@ -210,6 +217,9 @@ struct CoverageTelemetry: Equatable {
     let savedNewAngleCount: Int
     let currentScanHealth: ScanHealthState
     let movementClassification: MovementClassification
+    let recentLinearMotionImpulse: Double
+    let recentRotationImpulse: Double
+    let rotationDominance: Double
     let viewChangeScore: Double
 }
 
@@ -220,5 +230,6 @@ struct CoverageSample: Equatable {
     let newAngleDelta: Int
     let isStable: Bool
     let movementClassification: MovementClassification
+    let evidenceWeight: Double
     let viewChangeScore: Double
 }
