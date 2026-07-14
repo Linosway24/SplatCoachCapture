@@ -8,6 +8,10 @@
 import AVFoundation
 import SwiftUI
 
+func formattedCoverageEvidence(_ value: Double) -> String {
+    String(format: "%.1f", value)
+}
+
 struct ContentView: View {
     @StateObject private var camera = CameraCaptureController()
     @State private var exportArchiveURL: URL?
@@ -524,7 +528,7 @@ struct ContentView: View {
                     ForEach(camera.coverageManager.summary.sectors) { sector in
                         reportRow(
                             sector.title,
-                            "\(sector.level.title) · S\(sector.savedFrames) A\(sector.newAngleFrames)"
+                            "\(sector.level.title) · S\(formattedCoverageEvidence(sector.savedFrames)) A\(formattedCoverageEvidence(sector.newAngleFrames))"
                         )
                     }
                 }

@@ -18,11 +18,32 @@ enum CaptureTuning {
     static let maxRotationRate = 2.5
     static let maxAcceleration = 1.25
     static let minimumRotationChangeRadians = 0.08
-    static let minimumOverlapViewChangeScore = 1.0
+    static let minimumOverlapViewChangeScore = 3.0
     static let lumaSampleStep = 8
     static let signatureColumns = 12
     static let signatureRows = 8
     static let jpegQuality = 0.9
+}
+
+enum LumaSignatureNovelty {
+    static func viewChangeScore(previous: [Double]?, current: [Double]) -> Double {
+        guard let previous, previous.count == current.count, !current.isEmpty else {
+            return .infinity
+        }
+
+        let normalizedPrevious = exposureNormalized(previous)
+        let normalizedCurrent = exposureNormalized(current)
+        let totalDifference = zip(normalizedPrevious, normalizedCurrent).reduce(0.0) { partial, pair in
+            partial + abs(pair.0 - pair.1)
+        }
+        return totalDifference / Double(current.count)
+    }
+
+    static func exposureNormalized(_ signature: [Double]) -> [Double] {
+        guard !signature.isEmpty else { return [] }
+        let mean = signature.reduce(0, +) / Double(signature.count)
+        return signature.map { $0 - mean }
+    }
 }
 
 enum FrameNoveltyDecision: Equatable {
@@ -994,7 +1015,10 @@ final class CameraCaptureController: NSObject, ObservableObject {
         }
 
         let signature = Self.lumaSignature(for: pixelBuffer)
-        let viewChangeScore = Self.viewChangeScore(previous: lastSavedSignature, current: signature)
+        let viewChangeScore = LumaSignatureNovelty.viewChangeScore(
+            previous: lastSavedSignature,
+            current: signature
+        )
         missionViewChangeScore = viewChangeScore
         lastViewChangeScore = viewChangeScore.isFinite ? viewChangeScore : 0
 
@@ -2414,17 +2438,6 @@ final class CameraCaptureController: NSObject, ObservableObject {
         }
 
         return signature
-    }
-
-    private static func viewChangeScore(previous: [Double]?, current: [Double]) -> Double {
-        guard let previous, previous.count == current.count, !current.isEmpty else {
-            return .infinity
-        }
-
-        let totalDifference = zip(previous, current).reduce(0.0) { partial, pair in
-            partial + abs(pair.0 - pair.1)
-        }
-        return totalDifference / Double(current.count)
     }
 
     nonisolated private static func writeJPEG(
