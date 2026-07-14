@@ -19,14 +19,14 @@ final class LumaSignatureNoveltyTests: XCTestCase {
         let score = LumaSignatureNovelty.viewChangeScore(previous: original, current: noisy)
 
         XCTAssertLessThan(score, CaptureTuning.minimumOverlapViewChangeScore)
-        XCTAssertEqual(
-            FrameNoveltyDecision.evaluate(
-                isFirstSave: false,
-                rotationDelta: 0,
-                viewChangeScore: score
-            ),
-            .overlap
+        var evaluator = FrameNoveltyEvaluator()
+        let result = evaluator.evaluate(
+            isFirstSave: false,
+            timestamp: Date(),
+            rotationDelta: 0,
+            viewChangeScore: score
         )
+        XCTAssertEqual(result.decision, .overlap)
     }
 
     func testMeaningfulSpatialChangeRemainsNovelAfterExposureNormalization() {
@@ -35,25 +35,41 @@ final class LumaSignatureNoveltyTests: XCTestCase {
         let score = LumaSignatureNovelty.viewChangeScore(previous: original, current: changed)
 
         XCTAssertGreaterThanOrEqual(score, CaptureTuning.minimumOverlapViewChangeScore)
-        XCTAssertEqual(
-            FrameNoveltyDecision.evaluate(
-                isFirstSave: false,
-                rotationDelta: 0,
-                viewChangeScore: score
-            ),
-            .newAngleViewChange
+        var evaluator = FrameNoveltyEvaluator()
+        let result = evaluator.evaluate(
+            isFirstSave: false,
+            timestamp: Date(),
+            rotationDelta: 0,
+            viewChangeScore: score
         )
+        XCTAssertEqual(result.decision, .newAngleViewChange)
     }
 
     func testRealRotationStillTakesPrecedence() {
-        XCTAssertEqual(
-            FrameNoveltyDecision.evaluate(
-                isFirstSave: false,
-                rotationDelta: CaptureTuning.minimumRotationChangeRadians,
-                viewChangeScore: 0
-            ),
-            .newAngleRotation
+        var evaluator = FrameNoveltyEvaluator()
+        let result = evaluator.evaluate(
+            isFirstSave: false,
+            timestamp: Date(),
+            rotationDelta: CaptureTuning.minimumRotationChangeRadians,
+            viewChangeScore: 0
         )
+        XCTAssertEqual(result.decision, .newAngleRotation)
+    }
+
+    func testSidewaysStructuralMovementRemainsDetectable() {
+        let original = [8.0, 12.0, 18.0, 30.0, 42.0, 55.0]
+        let shifted = [18.0, 30.0, 42.0, 55.0, 8.0, 12.0]
+        let score = LumaSignatureNovelty.viewChangeScore(previous: original, current: shifted)
+        var evaluator = FrameNoveltyEvaluator()
+        let result = evaluator.evaluate(
+            isFirstSave: false,
+            timestamp: Date(),
+            rotationDelta: 0,
+            viewChangeScore: score
+        )
+
+        XCTAssertGreaterThan(score, CaptureTuning.minimumOverlapViewChangeScore)
+        XCTAssertEqual(result.decision, .newAngleViewChange)
     }
 }
 

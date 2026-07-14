@@ -19,6 +19,8 @@ enum CaptureTuning {
     static let maxAcceleration = 1.25
     static let minimumRotationChangeRadians = 0.08
     static let minimumOverlapViewChangeScore = 3.0
+    static let lumaNoveltyResetScore = 1.5
+    static let lumaNoveltyCooldown: TimeInterval = 1.2
     static let lumaSampleStep = 8
     static let signatureColumns = 12
     static let signatureRows = 8
@@ -46,24 +48,150 @@ enum LumaSignatureNovelty {
     }
 }
 
-enum FrameNoveltyDecision: Equatable {
+enum FrameNoveltyDecision: String, Equatable, Encodable {
     case overlap
     case newAngleRotation
     case newAngleViewChange
+    case lumaSuppressedCooldown
+    case lumaSuppressedNotRearmed
+}
 
-    static func evaluate(
+enum LumaThresholdState: String, Equatable, Encodable {
+    case belowReset
+    case betweenThresholds
+    case atOrAboveEnter
+}
+
+struct FrameNoveltyDiagnostic: Equatable, Encodable {
+    let decision: FrameNoveltyDecision
+    let suppressionReason: String?
+    let elapsedSincePriorLumaNovelty: TimeInterval?
+    let lumaScore: Double
+    let lumaEnterThreshold: Double
+    let lumaResetThreshold: Double
+    let lumaCooldownDuration: TimeInterval
+    let lumaThresholdState: LumaThresholdState
+    let lumaArmedBeforeDecision: Bool
+    let lumaArmedAfterDecision: Bool
+}
+
+struct FrameNoveltyEvaluator {
+    private(set) var lastLumaNoveltyAt: Date?
+    private(set) var isLumaArmed = true
+
+    mutating func reset() {
+        lastLumaNoveltyAt = nil
+        isLumaArmed = true
+    }
+
+    mutating func evaluate(
         isFirstSave: Bool,
+        timestamp: Date,
         rotationDelta: Double,
         viewChangeScore: Double
-    ) -> FrameNoveltyDecision {
-        guard !isFirstSave else { return .overlap }
+    ) -> FrameNoveltyDiagnostic {
+        let elapsed = lastLumaNoveltyAt.map { max(timestamp.timeIntervalSince($0), 0) }
+        let thresholdState = Self.thresholdState(for: viewChangeScore)
+
+        if viewChangeScore.isFinite, viewChangeScore <= CaptureTuning.lumaNoveltyResetScore {
+            isLumaArmed = true
+        }
+        let armedBeforeDecision = isLumaArmed
+
+        if isFirstSave {
+            return diagnostic(
+                decision: .overlap,
+                elapsed: elapsed,
+                score: viewChangeScore,
+                thresholdState: thresholdState,
+                armedBeforeDecision: armedBeforeDecision
+            )
+        }
+
         if rotationDelta >= CaptureTuning.minimumRotationChangeRadians {
-            return .newAngleRotation
+            return diagnostic(
+                decision: .newAngleRotation,
+                elapsed: elapsed,
+                score: viewChangeScore,
+                thresholdState: thresholdState,
+                armedBeforeDecision: armedBeforeDecision
+            )
         }
-        if viewChangeScore.isInfinite || viewChangeScore >= CaptureTuning.minimumOverlapViewChangeScore {
-            return .newAngleViewChange
+
+        guard viewChangeScore.isInfinite ||
+                viewChangeScore >= CaptureTuning.minimumOverlapViewChangeScore else {
+            return diagnostic(
+                decision: .overlap,
+                elapsed: elapsed,
+                score: viewChangeScore,
+                thresholdState: thresholdState,
+                armedBeforeDecision: armedBeforeDecision
+            )
         }
-        return .overlap
+
+        if let elapsed, elapsed < CaptureTuning.lumaNoveltyCooldown {
+            return diagnostic(
+                decision: .lumaSuppressedCooldown,
+                suppressionReason: "cooldown",
+                elapsed: elapsed,
+                score: viewChangeScore,
+                thresholdState: thresholdState,
+                armedBeforeDecision: armedBeforeDecision
+            )
+        }
+
+        guard isLumaArmed else {
+            return diagnostic(
+                decision: .lumaSuppressedNotRearmed,
+                suppressionReason: "not-rearmed",
+                elapsed: elapsed,
+                score: viewChangeScore,
+                thresholdState: thresholdState,
+                armedBeforeDecision: armedBeforeDecision
+            )
+        }
+
+        lastLumaNoveltyAt = timestamp
+        isLumaArmed = false
+        return diagnostic(
+            decision: .newAngleViewChange,
+            elapsed: elapsed,
+            score: viewChangeScore,
+            thresholdState: thresholdState,
+            armedBeforeDecision: armedBeforeDecision
+        )
+    }
+
+    private func diagnostic(
+        decision: FrameNoveltyDecision,
+        suppressionReason: String? = nil,
+        elapsed: TimeInterval?,
+        score: Double,
+        thresholdState: LumaThresholdState,
+        armedBeforeDecision: Bool
+    ) -> FrameNoveltyDiagnostic {
+        FrameNoveltyDiagnostic(
+            decision: decision,
+            suppressionReason: suppressionReason,
+            elapsedSincePriorLumaNovelty: elapsed,
+            lumaScore: score,
+            lumaEnterThreshold: CaptureTuning.minimumOverlapViewChangeScore,
+            lumaResetThreshold: CaptureTuning.lumaNoveltyResetScore,
+            lumaCooldownDuration: CaptureTuning.lumaNoveltyCooldown,
+            lumaThresholdState: thresholdState,
+            lumaArmedBeforeDecision: armedBeforeDecision,
+            lumaArmedAfterDecision: isLumaArmed
+        )
+    }
+
+    private static func thresholdState(for score: Double) -> LumaThresholdState {
+        if score.isInfinite || score >= CaptureTuning.minimumOverlapViewChangeScore {
+            return .atOrAboveEnter
+        }
+        if score <= CaptureTuning.lumaNoveltyResetScore {
+            return .belowReset
+        }
+        return .betweenThresholds
     }
 }
 
@@ -159,6 +287,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
     private var pendingScanHealthStartedAt: Date?
     private var movementEvidenceTracker = MovementEvidenceTracker()
     private var movementEvidenceSnapshot: MovementEvidenceSnapshot = .empty
+    private var frameNoveltyEvaluator = FrameNoveltyEvaluator()
 
     override init() {
         super.init()
@@ -269,6 +398,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         pendingScanHealthStartedAt = nil
         movementEvidenceTracker.reset()
         movementEvidenceSnapshot = .empty
+        frameNoveltyEvaluator.reset()
         fpsWindowStartedAt = startedAt
         fpsWindowFrameCount = 0
         isScanning = true
@@ -770,6 +900,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         pendingScanHealthStartedAt = nil
         movementEvidenceTracker.reset()
         movementEvidenceSnapshot = .empty
+        frameNoveltyEvaluator.reset()
         fpsWindowStartedAt = nil
         fpsWindowFrameCount = 0
         isScanning = false
@@ -1063,11 +1194,13 @@ final class CameraCaptureController: NSObject, ObservableObject {
             return
         }
 
-        let reason = saveReason(
+        let noveltyDiagnostic = frameNoveltyEvaluator.evaluate(
             isFirstSave: isFirstSave,
+            timestamp: now,
             rotationDelta: poseChange.rotation,
             viewChangeScore: viewChangeScore
         )
+        let reason = saveReason(for: noveltyDiagnostic.decision, isFirstSave: isFirstSave)
 
         updateLiveIntelligence(
             at: now,
@@ -1090,6 +1223,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
             poseChange: poseChange,
             viewChangeScore: viewChangeScore,
             reason: reason,
+            noveltyDiagnostic: noveltyDiagnostic,
             scanHealth: activeScanHealth,
             timeSinceLastSaved: timeSinceLastSaved,
             frameQuality: frameQuality
@@ -1116,12 +1250,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         )
     }
 
-    private func saveReason(isFirstSave: Bool, rotationDelta: Double, viewChangeScore: Double) -> String {
-        switch FrameNoveltyDecision.evaluate(
-            isFirstSave: isFirstSave,
-            rotationDelta: rotationDelta,
-            viewChangeScore: viewChangeScore
-        ) {
+    private func saveReason(for decision: FrameNoveltyDecision, isFirstSave: Bool) -> String {
+        switch decision {
         case .newAngleRotation:
             savedNewAngleCount += 1
             return "Saved new angle - rotation"
@@ -1131,6 +1261,12 @@ final class CameraCaptureController: NSObject, ObservableObject {
         case .overlap:
             savedForOverlapCount += 1
             return isFirstSave ? "Saved overlap - first frame" : "Saved overlap"
+        case .lumaSuppressedCooldown:
+            savedForOverlapCount += 1
+            return "Saved overlap - luma cooldown"
+        case .lumaSuppressedNotRearmed:
+            savedForOverlapCount += 1
+            return "Saved overlap - luma not rearmed"
         }
     }
 
@@ -1212,6 +1348,7 @@ final class CameraCaptureController: NSObject, ObservableObject {
         poseChange: PoseChange,
         viewChangeScore: Double,
         reason: String,
+        noveltyDiagnostic: FrameNoveltyDiagnostic,
         scanHealth: ScanHealthState,
         timeSinceLastSaved: TimeInterval?,
         frameQuality: FrameQualityAssessment
@@ -1274,7 +1411,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                         viewChangeScore: viewChangeScore,
                         timeSinceLastSaved: timeSinceLastSaved,
                         scanHealth: scanHealth,
-                        frameQuality: frameQuality
+                        frameQuality: frameQuality,
+                        noveltyDiagnostic: noveltyDiagnostic
                     )
                     self.appendFrameEvent(
                         CaptureFrameEvent(
@@ -1360,7 +1498,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
         viewChangeScore: Double?,
         timeSinceLastSaved: TimeInterval?,
         scanHealth: ScanHealthState,
-        frameQuality: FrameQualityAssessment
+        frameQuality: FrameQualityAssessment,
+        noveltyDiagnostic: FrameNoveltyDiagnostic? = nil
     ) {
         let focus = currentFocusDiagnostic()
         motionDiagnostics.append(
@@ -1387,7 +1526,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 scanHealth: scanHealth.rawValue,
                 focusMode: focus.mode,
                 isAdjustingFocus: focus.isAdjusting,
-                lensPosition: focus.lensPosition
+                lensPosition: focus.lensPosition,
+                novelty: noveltyDiagnostic
             )
         )
         coverageManager.recordFrameDiagnostic(
@@ -1536,6 +1676,8 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 maxAcceleration: CaptureTuning.maxAcceleration,
                 minimumRotationChangeRadians: CaptureTuning.minimumRotationChangeRadians,
                 minimumOverlapViewChangeScore: CaptureTuning.minimumOverlapViewChangeScore,
+                lumaNoveltyResetScore: CaptureTuning.lumaNoveltyResetScore,
+                lumaNoveltyCooldown: CaptureTuning.lumaNoveltyCooldown,
                 jpegQuality: CaptureTuning.jpegQuality
             ),
             averageBlurScore: frameEvents.compactMap(\.blurScore).average,
@@ -1620,7 +1762,17 @@ final class CameraCaptureController: NSObject, ObservableObject {
             "scanHealth",
             "focusMode",
             "isAdjustingFocus",
-            "lensPosition"
+            "lensPosition",
+            "noveltyDecision",
+            "lumaSuppressionReason",
+            "elapsedSincePriorLumaNovelty",
+            "lumaScore",
+            "lumaEnterThreshold",
+            "lumaResetThreshold",
+            "lumaCooldownDuration",
+            "lumaThresholdState",
+            "lumaArmedBeforeDecision",
+            "lumaArmedAfterDecision"
         ].joined(separator: ",")
 
         let formatter = ISO8601DateFormatter()
@@ -1648,7 +1800,17 @@ final class CameraCaptureController: NSObject, ObservableObject {
                 diagnostic.scanHealth,
                 diagnostic.focusMode,
                 diagnostic.isAdjustingFocus ? "true" : "false",
-                Self.csvNumber(diagnostic.lensPosition)
+                Self.csvNumber(diagnostic.lensPosition),
+                diagnostic.novelty?.decision.rawValue ?? "",
+                diagnostic.novelty?.suppressionReason ?? "",
+                Self.csvNumber(diagnostic.novelty?.elapsedSincePriorLumaNovelty),
+                Self.csvNumber(diagnostic.novelty?.lumaScore),
+                Self.csvNumber(diagnostic.novelty?.lumaEnterThreshold),
+                Self.csvNumber(diagnostic.novelty?.lumaResetThreshold),
+                Self.csvNumber(diagnostic.novelty?.lumaCooldownDuration),
+                diagnostic.novelty?.lumaThresholdState.rawValue ?? "",
+                diagnostic.novelty.map { $0.lumaArmedBeforeDecision ? "true" : "false" } ?? "",
+                diagnostic.novelty.map { $0.lumaArmedAfterDecision ? "true" : "false" } ?? ""
             ]
             .map(Self.csvEscape)
             .joined(separator: ",")
@@ -2789,6 +2951,8 @@ struct CaptureSettings: Encodable {
     let maxAcceleration: Double
     let minimumRotationChangeRadians: Double
     let minimumOverlapViewChangeScore: Double
+    let lumaNoveltyResetScore: Double
+    let lumaNoveltyCooldown: TimeInterval
     let jpegQuality: Double
 }
 
@@ -2842,6 +3006,7 @@ struct CaptureMotionDiagnostic: Encodable {
     let focusMode: String
     let isAdjustingFocus: Bool
     let lensPosition: Double?
+    let novelty: FrameNoveltyDiagnostic?
 }
 
 struct WorkingScanState: Encodable {
@@ -3066,7 +3231,25 @@ private extension CaptureMotionDiagnostic {
             scanHealth: scanHealth,
             focusMode: focusMode,
             isAdjustingFocus: isAdjustingFocus,
-            lensPosition: lensPosition?.finiteOrNil
+            lensPosition: lensPosition?.finiteOrNil,
+            novelty: novelty?.jsonSafe
+        )
+    }
+}
+
+private extension FrameNoveltyDiagnostic {
+    var jsonSafe: FrameNoveltyDiagnostic {
+        FrameNoveltyDiagnostic(
+            decision: decision,
+            suppressionReason: suppressionReason,
+            elapsedSincePriorLumaNovelty: elapsedSincePriorLumaNovelty?.finiteOrNil,
+            lumaScore: lumaScore.isFinite ? lumaScore : 0,
+            lumaEnterThreshold: lumaEnterThreshold,
+            lumaResetThreshold: lumaResetThreshold,
+            lumaCooldownDuration: lumaCooldownDuration,
+            lumaThresholdState: lumaThresholdState,
+            lumaArmedBeforeDecision: lumaArmedBeforeDecision,
+            lumaArmedAfterDecision: lumaArmedAfterDecision
         )
     }
 }
