@@ -105,6 +105,10 @@ final class CoverageDiagnosticsTests: XCTestCase {
         XCTAssertTrue(json.contains("\"normalizedYawDegrees\""))
         XCTAssertTrue(json.contains("\"sectorBoundaries\""))
         XCTAssertTrue(json.contains("\"controlledTestProcedure\""))
+        XCTAssertTrue(json.contains("\"coachingThresholds\""))
+        XCTAssertTrue(json.contains("\"coachingChanges\""))
+        XCTAssertTrue(json.contains("\"phase\":\"startup\""))
+        XCTAssertTrue(json.contains("\"recommendationKey\":\"startup.perimeter-pass\""))
         XCTAssertTrue(json.contains("\"perFrame\""))
         XCTAssertTrue(json.contains("\"savedFrames\":0.25"))
 
@@ -115,6 +119,42 @@ final class CoverageDiagnosticsTests: XCTestCase {
         XCTAssertTrue(csv.hasPrefix(CoverageFrameDiagnosticsCSVEncoder.columns.joined(separator: ",")))
         XCTAssertTrue(csv.contains("oppositeWall"))
         XCTAssertTrue(csv.contains(",true,false,,1.000000,0.750000,false,true,walking,capturing"))
+    }
+
+    func testCoachingDiagnosticsRecordTargetSeverityAndChangeReason() {
+        let manager = CoverageManager()
+        let start = Date(timeIntervalSince1970: 100)
+        manager.startScan(initialAttitude: nil)
+
+        let samples: [(TimeInterval, Double, Int, Int)] = [
+            (0, 0, 4, 1),
+            (4, -.pi / 2, 8, 2),
+            (9, .pi, 12, 3)
+        ]
+        for sample in samples {
+            manager.update(with: CoverageTelemetry(
+                timestamp: start.addingTimeInterval(sample.0),
+                isScanning: true,
+                yawRadians: sample.1,
+                savedFrameCount: sample.2,
+                savedNewAngleCount: sample.3,
+                currentScanHealth: .capturing,
+                movementClassification: .walking,
+                recentLinearMotionImpulse: 1.1,
+                recentRotationImpulse: 0.2,
+                rotationDominance: 0.15,
+                viewChangeScore: 1.5
+            ))
+        }
+
+        let diagnostics = manager.diagnostics
+        XCTAssertEqual(diagnostics.summary.recommendation.phase, .correcting)
+        XCTAssertEqual(diagnostics.summary.recommendation.targetSector, .leftSide)
+        XCTAssertEqual(diagnostics.summary.recommendation.deficitSeverity, .large)
+        XCTAssertEqual(diagnostics.summary.recommendation.changeReason, "startup-evidence-ready")
+        XCTAssertEqual(diagnostics.summary.recommendation.changedAt, start.addingTimeInterval(9))
+        XCTAssertEqual(diagnostics.coachingChanges.map(\.phase), [.startup, .correcting])
+        XCTAssertEqual(diagnostics.coachingChanges.last?.recommendationKey, "correcting.leftSide.large")
     }
 
     private func telemetry(yaw: Double, saved: Int) -> CoverageTelemetry {

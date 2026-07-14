@@ -92,6 +92,35 @@ struct CoverageEvidence: Identifiable, Equatable, Codable {
 struct CoverageRecommendation: Equatable, Codable {
     let text: String
     let priority: CoverageRecommendationPriority
+    let phase: CoverageCoachingPhase
+    let targetSector: CoverageSectorID?
+    let deficitSeverity: CoverageDeficitSeverity?
+    let key: String
+    let changeReason: String?
+    let changedAt: Date?
+}
+
+enum CoverageCoachingPhase: String, Equatable, Codable {
+    case startup
+    case normal
+    case correcting
+    case completed
+}
+
+enum CoverageDeficitSeverity: String, Equatable, Codable {
+    case small
+    case moderate
+    case large
+}
+
+struct CoverageCoachingChange: Equatable, Codable {
+    let phase: CoverageCoachingPhase
+    let targetSector: CoverageSectorID?
+    let deficitSeverity: CoverageDeficitSeverity?
+    let recommendationText: String
+    let recommendationKey: String
+    let reason: String
+    let timestamp: Date
 }
 
 struct CoverageSummary: Equatable, Codable {
@@ -111,7 +140,13 @@ struct CoverageSummary: Equatable, Codable {
         },
         recommendation: CoverageRecommendation(
             text: "Continue one steady perimeter pass.",
-            priority: .normal
+            priority: .normal,
+            phase: .startup,
+            targetSector: nil,
+            deficitSeverity: nil,
+            key: "startup.perimeter-pass",
+            changeReason: nil,
+            changedAt: nil
         )
     )
 
@@ -131,6 +166,14 @@ enum CoverageTuning {
     static let strongSavedFrames = 14
     static let strongNewAngleFrames = 5
     static let strongStableFrames = 8
+
+    // Coaching does not leave startup until time, capture volume, and
+    // directional diversity all support a meaningful weakest-sector choice.
+    static let coachingStartupMinimumDuration: TimeInterval = 8
+    static let coachingStartupMinimumSavedFrames = 12
+    static let coachingStartupMinimumSectorsWithEvidence = 3
+    static let coachingSmallDeficitMinimumProgress = 0.75
+    static let coachingCompletionAcknowledgementDuration: TimeInterval = 2
 
     static let methodology = "relative-yaw-four-sector-v1"
     static let controlledTestProcedure = [
@@ -161,8 +204,26 @@ struct CoverageDiagnostics: Codable, Equatable {
     let thresholds: CoverageThresholds
     let sectorBoundaries: [CoverageSector]
     let controlledTestProcedure: [String]
+    let coachingThresholds: CoverageCoachingThresholds
     let summary: CoverageSummary
+    let coachingChanges: [CoverageCoachingChange]
     let perFrame: [CoverageFrameDiagnostic]
+}
+
+struct CoverageCoachingThresholds: Codable, Equatable {
+    let startupMinimumDuration: TimeInterval
+    let startupMinimumSavedFrames: Int
+    let startupMinimumSectorsWithEvidence: Int
+    let smallDeficitMinimumProgress: Double
+    let completionAcknowledgementDuration: TimeInterval
+
+    static let current = CoverageCoachingThresholds(
+        startupMinimumDuration: CoverageTuning.coachingStartupMinimumDuration,
+        startupMinimumSavedFrames: CoverageTuning.coachingStartupMinimumSavedFrames,
+        startupMinimumSectorsWithEvidence: CoverageTuning.coachingStartupMinimumSectorsWithEvidence,
+        smallDeficitMinimumProgress: CoverageTuning.coachingSmallDeficitMinimumProgress,
+        completionAcknowledgementDuration: CoverageTuning.coachingCompletionAcknowledgementDuration
+    )
 }
 
 struct CoverageFrameDiagnostic: Codable, Equatable {

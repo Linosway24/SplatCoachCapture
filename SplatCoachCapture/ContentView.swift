@@ -260,15 +260,7 @@ struct ContentView: View {
 
             Label(compactCoachingInstruction, systemImage: "figure.walk")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-
-            Label(
-                camera.coverageManager.summary.recommendation.text,
-                systemImage: "square.grid.2x2"
-            )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(compactCoverageColor)
+                .foregroundStyle(compactCoachingColor)
                 .lineLimit(2)
         }
         .padding(.horizontal, 12)
@@ -285,8 +277,7 @@ struct ContentView: View {
         .accessibilityLabel(
             "\(camera.missionManager.activeMission.title). " +
             "\(camera.savedFrameCount) frames saved. " +
-            "\(compactCoachingInstruction). " +
-            "Coverage: \(camera.coverageManager.summary.recommendation.text)"
+            compactCoachingInstruction
         )
     }
 
@@ -295,11 +286,17 @@ struct ContentView: View {
         case .coach, .hold, .lost:
             return camera.liveCoachingText
         case .ready, .capturing:
-            return camera.missionManager.progress.instruction
+            return camera.coverageManager.summary.recommendation.text
         }
     }
 
-    private var compactCoverageColor: Color {
+    private var compactCoachingColor: Color {
+        if camera.currentScanHealth == .coach ||
+            camera.currentScanHealth == .hold ||
+            camera.currentScanHealth == .lost {
+            return .white
+        }
+
         switch camera.coverageManager.summary.recommendation.priority {
         case .complete:
             return .green

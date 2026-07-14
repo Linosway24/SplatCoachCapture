@@ -22,6 +22,8 @@ final class CoverageManager: ObservableObject {
     private var samples: [CoverageSample] = []
     private var frameDiagnostics: [CoverageFrameDiagnostic] = []
     private var lastMovementClassification: MovementClassification = .unknown
+    private var scanStartedAt: Date?
+    private var currentSector: CoverageSectorID?
 
     func startScan(initialAttitude: CMAttitude?) {
         startingYawRadians = initialAttitude?.yaw
@@ -30,11 +32,14 @@ final class CoverageManager: ObservableObject {
         samples = []
         frameDiagnostics = []
         lastMovementClassification = .unknown
-        summary = makeSummary()
+        scanStartedAt = nil
+        currentSector = nil
+        recommendationEngine.reset()
+        summary = .empty
     }
 
     func stopScan() {
-        summary = makeSummary()
+        currentSector = nil
     }
 
     func reset() {
@@ -44,15 +49,25 @@ final class CoverageManager: ObservableObject {
         samples = []
         frameDiagnostics = []
         lastMovementClassification = .unknown
+        scanStartedAt = nil
+        currentSector = nil
+        recommendationEngine.reset()
         summary = .empty
     }
 
     func update(with telemetry: CoverageTelemetry) {
         guard telemetry.isScanning else { return }
         lastMovementClassification = telemetry.movementClassification
+        if scanStartedAt == nil {
+            scanStartedAt = telemetry.timestamp
+        }
 
         if startingYawRadians == nil, let yaw = telemetry.yawRadians {
             startingYawRadians = yaw
+        }
+
+        if let yaw = telemetry.yawRadians, let origin = startingYawRadians {
+            currentSector = sectorEvaluator.sector(for: yaw - origin)
         }
 
         let savedDelta = max(telemetry.savedFrameCount - lastSavedFrameCount, 0)
@@ -60,44 +75,45 @@ final class CoverageManager: ObservableObject {
         lastSavedFrameCount = telemetry.savedFrameCount
         lastSavedNewAngleCount = telemetry.savedNewAngleCount
 
-        guard savedDelta > 0 || newAngleDelta > 0 else {
-            return
+        if savedDelta > 0 || newAngleDelta > 0, let currentSector {
+            let motionState = Self.motionState(
+                classification: telemetry.movementClassification,
+                recentLinearMotionImpulse: telemetry.recentLinearMotionImpulse,
+                recentRotationImpulse: telemetry.recentRotationImpulse,
+                rotationDominance: telemetry.rotationDominance
+            )
+            let sample = CoverageSample(
+                timestamp: telemetry.timestamp,
+                sectorID: currentSector,
+                savedFrameDelta: savedDelta,
+                newAngleDelta: newAngleDelta,
+                isStable: telemetry.currentScanHealth == .capturing || telemetry.currentScanHealth == .coach,
+                movementClassification: telemetry.movementClassification,
+                evidenceWeight: Self.evidenceWeight(for: motionState),
+                viewChangeScore: telemetry.viewChangeScore.isFinite ? telemetry.viewChangeScore : 0
+            )
+            samples.append(sample)
         }
 
-        guard let yaw = telemetry.yawRadians, let origin = startingYawRadians else {
-            return
-        }
-
-        let motionState = Self.motionState(
-            classification: telemetry.movementClassification,
-            recentLinearMotionImpulse: telemetry.recentLinearMotionImpulse,
-            recentRotationImpulse: telemetry.recentRotationImpulse,
-            rotationDominance: telemetry.rotationDominance
-        )
-        let sample = CoverageSample(
-            timestamp: telemetry.timestamp,
-            sectorID: sectorEvaluator.sector(for: yaw - origin),
-            savedFrameDelta: savedDelta,
-            newAngleDelta: newAngleDelta,
-            isStable: telemetry.currentScanHealth == .capturing || telemetry.currentScanHealth == .coach,
-            movementClassification: telemetry.movementClassification,
-            evidenceWeight: Self.evidenceWeight(for: motionState),
-            viewChangeScore: telemetry.viewChangeScore.isFinite ? telemetry.viewChangeScore : 0
-        )
-
-        samples.append(sample)
-        summary = makeSummary()
+        summary = makeSummary(timestamp: telemetry.timestamp, savedFrameCount: telemetry.savedFrameCount)
     }
 
-    private func makeSummary() -> CoverageSummary {
+    private func makeSummary(timestamp: Date, savedFrameCount: Int) -> CoverageSummary {
         let sectorEvidence = CoverageSectorID.allCases.map { sectorID in
             evidence(for: sectorID)
         }
+        let startedAt = scanStartedAt ?? timestamp
         return CoverageSummary(
             sectors: sectorEvidence,
             recommendation: recommendationEngine.recommendation(
                 for: sectorEvidence,
-                movementClassification: lastMovementClassification
+                movementClassification: lastMovementClassification,
+                context: CoverageCoachingContext(
+                    timestamp: timestamp,
+                    scanStartedAt: startedAt,
+                    savedFrameCount: savedFrameCount,
+                    currentSector: currentSector
+                )
             )
         )
     }
@@ -257,7 +273,9 @@ final class CoverageManager: ObservableObject {
             thresholds: .current,
             sectorBoundaries: sectorEvaluator.sectors,
             controlledTestProcedure: CoverageTuning.controlledTestProcedure,
+            coachingThresholds: .current,
             summary: summary,
+            coachingChanges: recommendationEngine.changeHistory,
             perFrame: frameDiagnostics
         )
     }

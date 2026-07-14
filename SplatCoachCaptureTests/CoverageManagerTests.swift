@@ -32,7 +32,8 @@ final class CoverageManagerTests: XCTestCase {
         XCTAssertEqual(start?.level, .sparse)
         XCTAssertEqual(start?.savedFrames, 3.5)
         XCTAssertEqual(start?.newAngleFrames, 1.25)
-        XCTAssertEqual(manager.summary.recommendation.priority, .important)
+        XCTAssertEqual(manager.summary.recommendation.phase, .startup)
+        XCTAssertEqual(manager.summary.recommendation.text, "Continue one steady perimeter pass.")
     }
 
     func testFourFractionalRotationContributionsAccumulateToOne() throws {
